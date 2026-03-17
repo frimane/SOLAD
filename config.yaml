@@ -1,0 +1,504 @@
+# Solar Latent Diffusion 
+# =================================
+
+# VAE ARCHITECTURE:
+#   latent_dim 96→112       latent_max was 5.5–6.0 vs tau_max 4.605 → dims saturating.
+#                           +16 dims gives overflow headroom and more capacity for cloudy
+#                           profiles that were underfitting at 3.6× clear recon ratio.
+#   encoder_channels        [64,128,256]→[64,128,256,384]  add a 4th stage so the encoder
+#                           can capture the short-burst ramp events that the old 3-stage
+#                           encoder was smoothing out (visible in cloudy daily profiles:
+#                           generated bell curve vs real irregular signal).
+#   encoder_dropout 0.15→0.10  with extra capacity, lower dropout to let cloudy structure
+#                           through rather than regularising it away.
+#   decoder_z_proj_dim 64→96  bottleneck was too tight relative to new latent_dim=112.
+#   decoder_z_film_hidden 32→48  FiLM conditioning needs more width for dim=112.
+#   film_hidden_dim 96→112  match latent_dim.
+#
+# VAE LOSSES:
+#   spectral_weight 0.55→0.65  cloudy profile shape was a smooth bell; spectral loss
+#                           is the primary force that preserves intraday variability.
+#   curvature_weight 0.25→0.35 forces reproduction of sharp dips/spikes in cloudy days.
+#   ramp_significance_threshold 0.027→0.020  counts more mixed-overcast ramp events.
+#   regime_loss_weights     backed off slightly from extreme 5.0 now that capacity is
+#                           higher: [1.0, 2.5, 4.0, 3.5]
+#   z_norm_clamp_lo 0.01→0.007  tau_max = −log(0.007)=4.962. Old tau_max=4.605 was
+#                           too tight — latent_max persistently 5.5–6.0.
+#   z_std_target 0.60→0.65  slightly higher to utilise latent_dim=112 space.
+#
+# DIFFUSION ARCHITECTURE:
+#   d_model 256→320         needs more width to learn 4-regime conditioning over 112-dim
+#                           latents. Overcast persistence failure is a capacity problem.
+#   n_layers 6→8            depth is the lever for long-range temporal dependency.
+#                           Uniform transition matrix = shallow model collapsing to marginal.
+#   regime_embed_dim 64→96  regime signal was too weak; bigger embedding = stronger CFG.
+#   intraday_proj_dim 64→96  scale with d_model.
+#   physics_embed_dim 32→48  minor upscale to keep physics conditioning proportional.
+#
+# DIFFUSION LOSSES (all RESET from CTRL-escalated values):
+#   variance_weight 5.0→0.05  RESET. CTRL had escalated to 5.0; start conservative.
+#   temporal_weight 0.10→0.15  overcast self-persistence was 0.05 vs real 0.23.
+#   cfg_guidance_scale 3.0→2.0  RESET from CTRL-escalated value.
+#   regime_loss_weights_diff  RESET to [1.0, 1.5, 2.0, 3.0].
+#   cfg_dropout_prob 0.10→0.15  more dropout forces robust regime conditioning learning.
+#
+# DOUBLE-COMPENSATION ELIMINATED:
+#   use_sampler: false in training.diffusion.
+#   WeightedRandomSampler + loss weights were both active → over-compensated → CTRL
+#   escalated weights to destabilising levels. Now loss weights only.
+#   CODE CHANGE REQUIRED — see training.diffusion.use_sampler note below.
+# =============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data
+# ─────────────────────────────────────────────────────────────────────────────
+data:
+  window_size: 14
+  window_stride: 3
+  zenith_threshold_deg: 85.0
+  max_gap_days: 1
+  max_interpolation_gap_minutes: 120
+  min_present_fraction: 0.70
+  inference_steps_per_day: 144
+
+  regime:
+    n_components: 4
+    n_init: 10
+    covariance_type: full
+    class_names: [clear, mixed_clear, mixed_overcast, overcast]
+    use_latent_relabels: true
+    kmeans_random_state: 42
+    kmeans_n_init: 10
+
+  augmentation:
+    noise_std: 0.02
+    temporal_jitter: 1
+    k_max_clip: 1.30          # must equal physics.k_max
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Physics
+# ─────────────────────────────────────────────────────────────────────────────
+physics:
+  k_max: 1.30                 # must equal data.augmentation.k_max_clip
+  tau_eps: 1.0e-6
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1: Autoencoder
+# ─────────────────────────────────────────────────────────────────────────────
+vae:
+  # latent_dim: 96→112. latent_max was 5.5–6.0, exceeding tau_max=4.605.
+  # 112 dims gives headroom AND more capacity for cloudy underfitting.
+  latent_dim: 112
+
+  # encoder_channels: added 4th stage [384]. 3-stage encoder was too shallow to
+  # capture short-burst ramp structure — profiles came out as smooth bells.
+  encoder_channels: [64, 128, 256, 384]
+
+  kernel_size: 5
+  stride: 2
+
+  # film_hidden_dim: match latent_dim.
+  film_hidden_dim: 112
+
+  # encoder_dropout: 0.15→0.10. More capacity means less aggressive regularisation.
+  encoder_dropout: 0.10
+
+  intraday_physics_dim: 3
+  encoder_film_hidden: 32
+  decoder_init_len: 8
+
+  # decoder_z_proj_dim: 64→96. Old bottleneck was too tight for latent_dim=112.
+  decoder_z_proj_dim: 96
+
+  decoder_delta_physics: true
+
+  # decoder_z_film_hidden: 32→48. FiLM conditioning needs more width for dim=112.
+  decoder_z_film_hidden: 48
+  
+  z_var_dim: 4           # dims appended to z_flat → d_z_full = latent_dim + z_var_dim
+  z_var_proj_hidden: 32  # MLP hidden size in _ZVarHead
+  z_var_ema_decay: 0.99  # running normalisation decay
+  z_var_use_ramp: true   # include mean|ΔK*| as 3rd feature
+  
+  decoder_phys_skip: true    # enable physics-only skip connections
+  phys_skip_hidden: 0        # 0 = single linear projection (cheapest)
+                             # set to 16 or 32 for a small nonlinear MLP: A linear projection is enough — intraday_phys is already a smooth, low-dimensional signal (3–5 dims). A nonlinear MLP would just overfit the physics-to-channel mapping on a dataset this small. Keep it linear.
+  # ── Spectral loss ─────────────────────────────────────────────────────────────
+  # spectral_weight: 0.55→0.65. Cloudy day profiles were smooth bells.
+  # Spectral loss is the primary force preserving intraday variability.
+  spectral_weight: 0.65
+
+  # spectral_warmup_epochs: 8→10. Longer warmup for larger model.
+  spectral_warmup_epochs: 10
+
+  # ramp_significance_threshold: 0.027→0.020. Lower threshold counts more mixed-
+  # overcast ramp events — old value was ignoring small physically-real ramps.
+  ramp_significance_threshold: 0.015
+
+  ramp_diag_threshold: 0.05
+  ramp_offset_steps: 2
+  phase_weight: 0.20
+  phase_amp_threshold: 0.05
+
+  # curvature_weight: 0.25→0.35. Forces reproduction of sharp dips/spikes in cloudy
+  # days. Observed profiles showed real sharp structure; generated showed none.
+  curvature_weight: 0.45
+
+  # ── Per-regime reconstruction weights ──────────────────────────────────────────
+  # Was [1.0, 3.5, 5.0, 4.0]. With latent_dim=112, back off slightly from 5.0.
+  # Mixed-overcast still highest (worst shape). [clear, mx-clear, mx-oc, overcast]
+  regime_loss_weights: [1.0, 2.5, 4.0, 3.5]
+
+  # ── Separation loss ────────────────────────────────────────────────────────────
+  # REDUCE INITIAL SEP PRESSURE (lit confirms separation comes naturally with enough capacity)
+  regime_sep_weight: 1.5         # was 2.0 — it reached clear-overcast dist 40+ anyway
+  dynamic_margin_alpha: 0.60     # was 0.70 — EMA margin was inflating too fast
+
+  mixed_margin_scale: 0.50
+  mixed_sep_weight: 2.0
+  regime_sep_min_samples: 4
+  sep_ema_decay: 0.98
+
+  # ── Latent regularisation ───────────────────────────────────────────────────────
+  latent_tau_percentile_lo: 1.0
+  latent_tau_percentile_hi: 99.0
+  latent_tau_std_margin: 0.5
+
+  z_var_weight: 1.0           # was 3.0 — the lower-bound penalty is now fighting the
+                              #           collapsed space too hard; reduce pressure
+  z_std_target: 0.55          # was 0.65 — give the latent space more room to breathe
+                              #            while it recovers; raise back later
+  z_std_upper_target: 2.2        # was 1.30 — incompatible with sep weights [1,2.5,4,3.5]
+
+  z_var_weight_upper: 1.50       # reset to starting value — controller escalated to 5.55
+
+  # z_norm_clamp_lo: 0.01→0.007. Sets tau_max = −log(0.007) = 4.962.
+  # Old tau_max=4.605 was too tight: latent_max was persistently 5.5–6.0,
+  # clamping at every forward pass and losing overcast information.
+  # Do NOT go below 0.005 (numerical instability in log).
+  z_norm_clamp_lo: 0.007
+
+  # ── Diagnostic warning thresholds ──────────────────────────────────────────────
+  mixed_recon_warn_ratio: 1.5
+  mixed_recon_err_ratio:  2.5
+  oc_recon_err_ratio:     3.0
+  ramp_warn_ratio:        2.5
+  latent_mean_warn:       0.5
+  latent_std_warn:        2.0
+  # latent_max_warn: raised to match new tau_max=4.962 so warnings fire correctly.
+  latent_max_warn:        5.2
+  decoder_clamp_warn:     0.05
+  dead_dim_std_threshold: 0.05
+  hot_dim_std_threshold:  4.0
+
+  # ── Startup sanity check thresholds ────────────────────────────────────────────
+  k_max_clip_warn_threshold:  1.50
+  phase_weight_warn_lo:       0.15
+  phase_weight_warn_recommended: 0.20
+  spectral_weight_warn_hi:    0.50
+  tau_cal_min_samples:        10
+  # FIX STAGNATION THRESHOLD (was firing false positives since epoch 30)
+  vae_stagnation_recon_thr: 0.25 # was 0.15 — model was at 0.22 and improving fine
+
+  obs_channels:
+    - diffuse_fraction
+    - dni
+    - sky_clarity_index
+    - csi_autocorrelation
+    - irradiance_gradient_mag
+    - csi_variability_w3
+    - csi_variability_w10
+    - csi_ramp_rate
+    - csi_trend_w5
+    - combined_ramp_event_100
+    - combined_ramp_event_300
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2: Latent Diffusion
+# ─────────────────────────────────────────────────────────────────────────────
+diffusion:
+  num_steps: 1000
+  noise_schedule: cosine
+  cosine_s: 0.008
+  alpha_bar_min: 0.002
+  prediction_type: v
+
+  # d_model: 256→320. Denoiser needs more width for 4-regime conditioning over
+  # 112-dim latents. ~10M params. Overcast persistence failure = capacity problem.
+  d_model: 320
+
+  # n_heads: keep 8. 320/8=40 per head — good ratio.
+  n_heads: 8
+
+  # n_layers: 6→8. Depth is the primary lever for long-range temporal dependencies.
+  # Uniform transition matrix = shallow model collapsing to marginal distribution.
+  # 8 layers gives the model enough depth to learn asymmetric regime transitions.
+  n_layers: 8
+
+  dropout: 0.10
+  ffn_mult: 4
+  day_feat_dim: 7
+  loc_feat_dim: 4
+
+  # physics_embed_dim: 32→48. Minor upscale proportional to d_model increase.
+  physics_embed_dim: 48
+
+  # intraday_proj_dim: 64→96. Scale with d_model.
+  intraday_proj_dim: 96
+
+  n_regimes: 4
+
+  # regime_embed_dim: 64→96. Regime signal was too weak — model collapsed to near-
+  # uniform transitions. Bigger embedding = stronger regime conditioning signal
+  # at every transformer layer.
+  regime_embed_dim: 96
+
+  # cfg_dropout_prob: 0.10→0.15. More CFG dropout forces both conditional and
+  # unconditional paths to be learned robustly from epoch 1.
+  cfg_dropout_prob: 0.15
+
+  # cfg_guidance_scale: raised from 1.5 to 3.5.
+  # window_var_ratio was stuck at 0.052 for 189 epochs — unresponsive to training
+  # loss changes because it is a sampling diversity problem, not a training problem.
+  # Higher guidance scale amplifies the regime conditioning signal during generation,
+  # pulling samples away from the mean-tau collapse toward the conditioned regime.
+  cfg_guidance_scale: 2.0       
+
+  # min_snr_gamma: 4.6→5.0. Higher gamma weights mid-noise steps more — this is
+  # where regime transition structure is primarily learned.
+  min_snr_gamma: 5.0
+
+  # regime_loss_weights_diff: RESET from CTRL-escalated state to clean baseline.
+  # Sampler is disabled (use_sampler: false). These are the only rebalancing weights.
+  # Keep ratio overcast/clear ≤ 3. [clear, mixed-clear, mixed-overcast, overcast]
+  regime_loss_weights_diff: [1.0, 1.2, 1.5, 1.8]   
+
+  per_day_k_sampling: true
+
+  # inpainting_prob: 0.30→0.35. More inpainting for better autoregressive coherence.
+  inpainting_prob: 0.35
+
+  n_ctx_train: 9              # must equal window_size(14) - inference.stride(5)
+
+  # temporal_weight
+  temporal_weight: 0.40
+
+  # variance_weight: HARD-CAPPED at 0.05.
+  # The controller (wvar_collapse rule) was escalating this to 5.0 which caused
+  # the aux loss to dominate MSE gradients and crash training.  The rule is now
+  # disabled (wvar_floor=0.0 in controller defaults).  Keep this small and static.
+  variance_weight: 0.05  
+
+  ramp_snr_floor: 1.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Training
+# ─────────────────────────────────────────────────────────────────────────────
+training:
+  vae:
+    # epochs: 100→120. Larger architecture converges slower.
+    # Previous best at epoch 53/100 — still had headroom.
+    epochs: 100
+
+    batch_size: 64
+
+    # lr: 5e-4→3e-4. Larger model (4-stage encoder) is more sensitive to LR at init.
+    lr: 3.0e-4
+
+    lr_min: 1.0e-5
+
+    # warmup_epochs: 8→10. Match larger model.
+    warmup_epochs: 10
+
+    warmup_start_factor: 0.1
+    grad_clip: 1.0
+    weight_decay: 0.0
+
+    # early_stopping_patience: 28→35. New 4th encoder stage needs time to stabilise.
+    early_stopping_patience: 20
+
+    num_workers: 2
+    log_every_n_steps: 50
+    log_grad_every_n_epochs: 5
+    loss_spike_multiplier: 10.0
+    loss_ema_alpha: 0.05
+
+  diffusion:
+    # epochs: 
+    # Previous 200 epochs were on broken null-token feedback — fresh start needs time.
+    epochs: 300
+
+    # batch_size: 64→48. d_model=320, n_layers=8, latent_dim=112 — memory safety.
+    # Raise back to 64 if GPU memory allows after first epoch completes.
+    batch_size: 48
+
+    # lr: 1e-4→8e-5. Larger model trains more stably at lower LR.
+    lr: 8.0e-5
+
+    lr_min: 1.0e-6
+
+    # warmup_epochs: 20→25. Match larger model and lower LR.
+    warmup_epochs: 25
+
+    warmup_start_factor: 1.0e-3
+    grad_clip: 1.0
+    weight_decay: 0.0
+    ema_decay: 0.999
+    val_ema_alpha: 0.10
+
+    # early_stopping_patience: 28→40. Regime learning is slow — last run showed
+    # slow convergence through epoch 196. Give it time.
+    early_stopping_patience: 40
+
+    num_workers: 2
+    latent_cache_aug_passes: 8
+    log_every_n_steps: 50
+    log_grad_every_n_epochs: 5
+
+    # use_sampler: false — ELIMINATES double-compensation.
+    # WeightedRandomSampler + regime_loss_weights_diff were BOTH active last run.
+    # This caused CTRL to escalate loss weights to 4.0 trying to fight both.
+    # Decision: disable sampler, use loss weights only for regime rebalancing.
+    #
+    # CODE CHANGE REQUIRED IN train.py (1 line):
+    # Find the diffusion DataLoader / sampler construction. Wrap it like:
+    #   use_sampler = cfg["training"]["diffusion"].get("use_sampler", True)
+    #   sampler = WeightedRandomSampler(...) if use_sampler else None
+    # Then pass sampler=sampler to DataLoader (shuffle=False when sampler is not None).
+    use_sampler: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Inference
+# ─────────────────────────────────────────────────────────────────────────────
+inference:
+  stride: 5
+  smooth_sigma: 0.50
+  boundary_width: 3
+  ddim_steps: 50
+  ddim_eta: 0.0
+  context_noise_std: 0.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# File paths
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+  vae_checkpoint:           checkpoints/vae_best.pt
+  diffusion_checkpoint:     checkpoints/diffusion_best.pt
+  latent_cache:             cache/latents.npy
+  latent_relabels:          cache/latent_relabels.npy
+  latent_relabels_map:      cache/latent_relabels_map.json
+  latent_tau_stats:         cache/latent_tau_stats.json
+  regime_gmm:               cache/regime_gmm.json
+  norm_stats_intraday:      data/norm_intraday.json
+  norm_stats_day_feat:      data/norm_day_feat.json
+  norm_stats_obs_phys:      data/norm_obs_phys.json
+  train_profiles:           data/profiles/train_profiles.json
+  val_profiles:             data/profiles/val_profiles.json
+  test_profiles:            data/profiles/test_profiles.json
+  vae_training_log:         logs/vae_training_log.jsonl
+  diffusion_training_log:   logs/diffusion_training_log.jsonl
+  output_csv:               outputs/timeseries.csv
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Diagnostics
+# ─────────────────────────────────────────────────────────────────────────────
+diagnostics:
+  vae_diag_freq: 5
+  latent_sep_log_freq: 5
+  tau_separation_min_to_proceed: 0.20
+  tau_diag_freq: 5
+  gen_diag_freq: 5
+  gen_diag_batches: 8
+
+  cloudy_clear_ratio_err:  6.0
+  cloudy_clear_ratio_warn: 4.0
+  overcast_loss_ratio_warn: 4.0
+  snr_low_high_ratio_warn:  3.0
+  tau_mean_warn:  1.0
+  tau_std_healthy_lo: 0.3
+  tau_std_healthy_hi: 2.5
+  tau_overflow_mean_thr: 3.0
+  tau_overflow_std_thr:  4.0
+  grad_norm_warn: 10.0
+  double_comp_obs_cloudy_warn: 0.55
+  double_comp_weight_warn: 1.5
+  # diff_startup_weight_warn: raised because sampler is now disabled.
+  # With sampler off, loss weights alone handle rebalancing so the startup
+  # double-comp check would produce false positives at the old threshold.
+  diff_startup_weight_warn: 3.5
+  diff_epoch_weight_warn: 3.0
+
+  snr_low_boundary:  1.0
+  snr_high_boundary: 10.0
+
+  gen_coverage_bin_lo: 0.40
+  gen_coverage_bin_hi: 0.70
+  diversity_ratio_err:  0.3
+  diversity_ratio_warn: 0.6
+  coverage_dark_gap_warn: 0.10
+  coverage_brt_gap_warn:  0.10
+  window_var_ratio_warn:  0.2
+
+  latent_sep_dist_min_warn: 0.5
+  overcast_min_frac_warn: 0.02
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────────────────────────────────────────
+logging:
+  log_every_n_steps: 50
+  save_every_n_epochs: 10
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Adaptive Training Controller
+# ─────────────────────────────────────────────────────────────────────────────
+controller:
+  enabled: true
+
+  # wvar_collapse rule: DISABLED.  See training_controller.py _rule_wvar_collapse.
+  # variance_weight escalation to 5.0 was the root cause of training crashes.
+  wvar_floor: 0.0          # was 0.20 — 0.0 permanently disables the rule
+  variance_weight_ceil: 0.15   # safety cap even if rule is re-enabled
+
+  # ── grad_clip rules ─────────────────────────────────────────────────────────
+  gnorm_spike_ratio: 5.0      # was 3.0 — sep-loss spikes are expected, not pathological  
+  gnorm_consec_epochs: 3      # was 2 — require 3 consecutive bad epochs before cutting
+  grad_clip_decay: 0.70       # was 0.50 — halving is too aggressive, use 30% cuts
+
+  grad_clip_floor_vae:     0.50   # was 0.15 — never let it go below this
+  grad_clip_floor_diff:    0.10
+  grad_clip_cooldown:      4
+
+  # ── separation loss rules (VAE only) ────────────────────────────────────────
+  sep_dominance_frac:      0.15
+  sep_weight_decay:        0.75
+  sep_weight_floor:        0.20
+  sep_alpha_decay:         0.85
+  sep_alpha_floor:         0.30
+  sep_cooldown:            5
+
+  # ── z_std rules (VAE only) ──────────────────────────────────────────────────
+  z_std_low_frac:          0.35
+  z_std_high_frac:         2.20
+  
+  # PREVENT CONTROLLER RE-RATCHETING
+  z_std_high_abs: 1.40           # was 1.00 — was firing below the healthy target range
+  z_var_weight_ceil: 8.0         # was 25.0 — hard cap prevents future runaway
+  
+  z_var_weight_boost_low:  1.60
+  z_var_weight_boost_high: 1.08
+  z_std_cooldown:          3
+
+  # ── diffusion cloudy/clear ratio rules (Stage 2 only) ───────────────────────
+  # diff_ratio_thr: 5.0→4.0. Fire earlier — last run let overcast learning
+  # collapse completely before CTRL intervened.
+  diff_ratio_thr:          4.0
+
+  diff_ratio_consec:       3
+  diff_weight_boost:       1.15
+
+  # diff_weight_ceil: 4.0→3.5. CTRL reached 4.0 last run and over-corrected.
+  # With sampler disabled, loss weights have more leverage — cap them lower.
+  diff_weight_ceil:        3.5
+
+  diff_ratio_cooldown:     6
