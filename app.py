@@ -984,6 +984,7 @@ st.markdown("<div class='section-title'>Generation</div>", unsafe_allow_html=Tru
 
 #st.markdown("<div class='ctrl-card'>", unsafe_allow_html=True)
 st.markdown("<div class='ctrl-title'>Parameters</div>", unsafe_allow_html=True)
+st.caption("The model currently generates data at 10-min resolution. Higher resolution requires more training hardware and time")
 
 c_lat, c_lon, c_s, c_e, c_btn = st.columns([1, 1, 1, 1, 0.8], gap="medium")
 with c_lat:
