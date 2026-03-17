@@ -1,4 +1,3 @@
-
 # SOLAD · Solar Irradiance Timeseries Generator
 
 
@@ -133,6 +132,12 @@ st.set_page_config(
     page_title="SOLAD — Solar Irradiance Generator",
     layout="wide",
     initial_sidebar_state="collapsed",
+)
+
+# Viewport meta — critical for mobile rendering
+st.markdown(
+    '<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">',
+    unsafe_allow_html=True,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -524,6 +529,113 @@ html { scroll-behavior: smooth !important; }
     display: flex !important;
     flex-direction: column !important;
 }
+
+/* ── MOBILE RESPONSIVENESS ── */
+@media (max-width: 768px) {
+    /* navbar: wrap to two lines on mobile */
+    .solad-nav {
+        flex-wrap: wrap !important;
+        height: auto !important;
+        padding: 0.5rem 1rem !important;
+        gap: 0.25rem !important;
+    }
+    .solad-nav .brand {
+        font-size: 0.95rem !important;
+        flex-basis: 100% !important;
+        padding: 0.2rem 0 !important;
+    }
+    .solad-nav .nav-right {
+        height: auto !important;
+        flex-wrap: wrap !important;
+        margin-left: 0 !important;
+        gap: 0 !important;
+        width: 100% !important;
+    }
+    .solad-nav a.nav-link {
+        height: auto !important;
+        padding: 0.3rem 0.6rem !important;
+        font-size: 0.7rem !important;
+        border-bottom: none !important;
+        border-left: 2px solid transparent !important;
+    }
+    .solad-nav a.nav-link.active {
+        border-left-color: var(--amber) !important;
+        border-bottom: none !important;
+    }
+    .solad-nav .nav-meta {
+        height: auto !important;
+        padding-left: 0.6rem !important;
+        margin-left: 0 !important;
+        font-size: 0.65rem !important;
+        border-left: none !important;
+        border-top: 1px solid var(--brd) !important;
+        width: 100% !important;
+        padding-top: 0.3rem !important;
+    }
+
+    /* more space below taller navbar */
+    .nav-spacer { height: 110px !important; }
+    .section-anchor {
+        height: 120px !important;
+        margin-top: -120px !important;
+    }
+
+    /* reduce page horizontal padding */
+    [data-testid="stMainBlockContainer"] {
+        padding-left: 0.75rem !important;
+        padding-right: 0.75rem !important;
+    }
+
+    /* title sizes */
+    #solad-title { font-size: 1.35rem !important; }
+    .section-title { font-size: 1rem !important; }
+    .prose { font-size: 0.8rem !important; line-height: 1.7 !important; }
+
+    /* metric cards: 2-column grid */
+    .metric-row {
+        display: grid !important;
+        grid-template-columns: 1fr 1fr !important;
+        gap: 8px !important;
+    }
+    .mcard .val { font-size: 1.1rem !important; }
+    .mcard .lbl { font-size: 0.6rem !important; }
+
+    /* export filename wraps cleanly */
+    .export-row .file-name {
+        word-break: break-all !important;
+        font-size: 0.72rem !important;
+    }
+    .export-row .file-meta { font-size: 0.62rem !important; }
+
+    /* station table: hide climate column on small screens */
+    .st-table th:last-child,
+    .st-table td:last-child { display: none !important; }
+
+    /* loader bar wider */
+    .solad-loader .loader-bar-track { width: 80vw !important; }
+    .solad-loader .loader-sub { font-size: 0.6rem !important; text-align: center !important; padding: 0 1rem !important; }
+
+    /* callout & note boxes */
+    .callout, .note-box, .step-box {
+        font-size: 0.72rem !important;
+    }
+}
+
+@media (max-width: 480px) {
+    /* metric cards: single column on very small phones */
+    .metric-row {
+        grid-template-columns: 1fr !important;
+    }
+    #solad-title { font-size: 1.1rem !important; }
+    .section-title { font-size: 0.95rem !important; }
+
+    /* reduce divider margins */
+    .hdiv { margin: 1.5rem 0 1rem 0 !important; }
+
+    /* empty state */
+    .empty-state { padding: 2rem 1rem !important; }
+    .empty-state .title { font-size: 0.82rem !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -904,7 +1016,7 @@ components.html("""
 st.markdown('<a class="section-anchor" id="about"></a>', unsafe_allow_html=True)
 
 # ── Two-column About layout: left = text, right = map (top) + table (bottom) ──
-col_text, col_right = st.columns([1.3, 1], gap="large")  # 60 % / 40 %
+col_text, col_right = st.columns([1.2, 1], gap="medium")
 
 with col_text:
     st.markdown("""
@@ -986,15 +1098,17 @@ st.markdown("<div class='section-title'>Generation</div>", unsafe_allow_html=Tru
 st.markdown("<div class='ctrl-title'>Parameters</div>", unsafe_allow_html=True)
 st.caption("The model currently generates data at 10-min resolution. Higher resolution requires more training hardware and time")
 
-c_lat, c_lon, c_s, c_e, c_btn = st.columns([1, 1, 1, 1, 0.8], gap="medium")
+c_lat, c_lon = st.columns([1, 1], gap="medium")
 with c_lat:
     lat = st.number_input("Latitude (°N)", value=40.05,
                           min_value=-90.0, max_value=90.0, step=0.01, format="%.4f")
 with c_lon:
     lon = st.number_input("Longitude (°E)", value=-88.37,
                           min_value=-180.0, max_value=180.0, step=0.01, format="%.4f")
+
+today = date.today()
+c_s, c_e, c_btn = st.columns([1, 1, 0.6], gap="medium")
 with c_s:
-    today = date.today()
     start_date = st.date_input("Start date", value=today,
                                min_value=DATE_MIN, max_value=DATE_MAX)
 with c_e:
@@ -1107,7 +1221,7 @@ if generate_btn:
         f"10-min timesteps &nbsp;&middot;&nbsp; kstar, ghi_Wm2, clearsky_ghi, zenith_deg</div></div>",
         unsafe_allow_html=True,
     )
-    dl_col, _ = st.columns([1, 3])
+    dl_col, _ = st.columns([1, 2])
     with dl_col:
         st.download_button("Export CSV", csv_bytes, fname, "text/csv", use_container_width=True)
 
