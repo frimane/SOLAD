@@ -1114,8 +1114,7 @@ if generate_btn:
     sample_label = "all days" if n_days <= 3 else "first, middle, and last day"
     st.markdown(
         f"<div class='sec-rule' style='margin-top:1.5rem;'>Generated Days Examples"
-        f"&nbsp;&mdash;&nbsp; {sample_label} &nbsp;&middot;&nbsp; "
-        f"GHI = K* &times; GHI<sub>cs</sub> &nbsp;&middot;&nbsp; 10-min resolution</div>",
+        f"&nbsp;&mdash;&nbsp; {sample_label} &nbsp;&middot;&nbsp; ",
         unsafe_allow_html=True,
     )
     st.markdown("<div class='result-panel'><div class='result-panel-inner'>", unsafe_allow_html=True)
