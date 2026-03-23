@@ -1328,7 +1328,7 @@ st.markdown("<hr class='hdiv'>", unsafe_allow_html=True)
 st.markdown('<a class="section-anchor" id="data"></a>', unsafe_allow_html=True)
 st.markdown("<div class='section-title'>SURFRAD Data Acquisition</div>", unsafe_allow_html=True)
  
-with st.expander("Download script — requires only pvlib and pandas", expanded=False):
+with st.expander("Download script", expanded=False):
     st.code('''\
 import pvlib, pandas as pd, socket, time, os, calendar
  
