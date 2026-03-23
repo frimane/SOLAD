@@ -1321,88 +1321,17 @@ else:
 
 st.markdown("<hr class='hdiv'>", unsafe_allow_html=True)
 
-
+ 
 # ==============================================================================
 # SECTION 3 - DATA REFERENCE
 # ==============================================================================
 st.markdown('<a class="section-anchor" id="data"></a>', unsafe_allow_html=True)
 st.markdown("<div class='section-title'>SURFRAD Data Acquisition</div>", unsafe_allow_html=True)
-
-with st.expander("What is SURFRAD?", expanded=False):
-    st.markdown("""
-    <div class='prose'>
-    The <strong>Surface Radiation Budget Network (SURFRAD)</strong> is operated by the NOAA
-    Global Monitoring Laboratory and has provided continuous, quality-controlled surface
-    radiation measurements since 1993. Each station records <strong>global horizontal
-    irradiance (GHI)</strong>, direct normal irradiance (DNI), diffuse horizontal irradiance
-    (DHI) and meteorological variables at
-    <strong>1-minute resolution</strong>. Data are archived in flat <code>.dat</code> text
-    files - one file per station per day - freely accessible via NOAA's anonymous FTP server.
-    The <code>pvlib</code> library provides <code>pvlib.iotools.read_surfrad</code> to parse
-    these into a tidy <code>pandas.DataFrame</code>.
-    </div>
-    """, unsafe_allow_html=True)
-
-with st.expander("Archive structure and station codes", expanded=False):
-    st.markdown("""
-    <div class='prose' style='margin-bottom:0.75rem;'>
-    FTP root: <code>ftp://aftp.cmdl.noaa.gov/data/radiation/surfrad/</code>.
-    Each station has its own subdirectory, further split by year. Daily files follow
-    the pattern <code>&lt;code&gt;&lt;YY&gt;&lt;DOY&gt;.dat</code>.
-    </div>
-    """, unsafe_allow_html=True)
-    st.code("""\
-ftp://aftp.cmdl.noaa.gov/data/radiation/surfrad/
-+-- Bondville_IL/
-|   +-- 2022/
-|   |   +-- bon22001.dat   
-|   |   +-- ...
-|   +-- 2023/
-+-- Desert_Rock_NV/
-+-- Fort_Peck_MT/
-+-- Goodwin_Creek_MS/
-+-- Penn_State_PA/
-+-- Sioux_Falls_SD/
-+-- tbl/                  """, language="text")
-
-with st.expander("Step-by-step download procedure", expanded=False):
-    steps = [
-        ("Step 1 - Install dependencies",
-         "Install with <code>pip install pvlib pandas</code>. No separate FTP client is required."),
-        ("Step 2 - Understand the file reader",
-         "<code>pvlib.iotools.read_surfrad(url, map_variables=True)</code> accepts a local path or "
-         "full FTP URL and returns a (<code>DataFrame</code>, <code>metadata dict</code>) tuple. "
-         "The <code>map_variables=True</code> flag renames columns to standard pvlib names: "
-         "<code>ghi</code>, <code>dni</code>, <code>dhi</code>"),
-        ("Step 3 - Construct the URL",
-         "Pattern: <code>ftp://...surfrad/{station}/{year}/{code}{YY}{DOY:03d}.dat</code>. "
-         "Example: Bondville, day 15 of 2022 &rarr; <code>bon22015.dat</code> inside <code>Bondville_IL/2022/</code>."),
-        ("Step 4 - Handle connection failures",
-         "Wrap each download in a retry loop (3 attempts, 1-second back-off). "
-         "Catch <code>socket.timeout</code>, <code>urllib.error.URLError</code>, and "
-         "generic <code>Exception</code> separately to avoid aborting an entire station-year."),
-        ("Step 5 - Respect the server",
-         "Insert a <strong>0.1-second delay between day files</strong> and a "
-         "<strong>2-second delay between years</strong>. Single-threaded only - no parallel downloads."),
-        ("Step 6 - Validate and persist",
-         "Apply physical bounds: GHI/DNI/DHI in [-50, 2000] W m\u207b\u00b2 ... "
-         "Save as <code>surfrad_data/{station}/{station}_{year}.csv</code>."),
-    ]
-    for title, body in steps:
-        st.markdown(
-            f"<div class='step-box'><div class='step-n'>{title}</div>{body}</div>",
-            unsafe_allow_html=True,
-        )
-
-with st.expander("Minimal working example", expanded=False):
-    st.markdown("""
-    <div class='prose' style='margin-bottom:0.5rem;'>
-    Self-contained script -- requires only <code>pvlib</code> and <code>pandas</code>.
-    </div>
-    """, unsafe_allow_html=True)
+ 
+with st.expander("Download script — requires only pvlib and pandas", expanded=False):
     st.code('''\
 import pvlib, pandas as pd, socket, time, os, calendar
-
+ 
 def download_surfrad_year(station_dir, code, year, out_dir="surfrad_data"):
     days = 366 if calendar.isleap(year) else 365
     base = f"ftp://aftp.cmdl.noaa.gov/data/radiation/surfrad/{station_dir}/{year}"
@@ -1430,7 +1359,7 @@ def download_surfrad_year(station_dir, code, year, out_dir="surfrad_data"):
     path = os.path.join(out_dir, station_dir, f"{station_dir}_{year}.csv")
     result.to_csv(path)
     return result
-
+ 
 if __name__ == "__main__":
     stations = [
         ("Bondville_IL", "bon"), ("Desert_Rock_NV", "dra"),
@@ -1443,18 +1372,7 @@ if __name__ == "__main__":
             download_surfrad_year(station_dir, code, year)
             time.sleep(2)
 ''', language="python")
-    st.markdown("""
-    <div class='note-box'>
-    <strong>Output format.</strong> Each CSV carries one row per 1-minute timestamp with
-    columns <code>ghi</code>, <code>dni</code>, <code>dhi</code>.
-    </div>
-    <div class='note-box' style='margin-top:0.5rem;'>
-    <strong>Data availability.</strong> The FTP archive is publicly accessible without
-    registration. Some station-years contain gaps due to instrument outages; the downloader
-    handles these gracefully by skipping missing files and continuing.
-    </div>
-    """, unsafe_allow_html=True)
-
+ 
 st.markdown(
     f"<div class='footer'>"
     f"For any questions or feedback, contact me at"
