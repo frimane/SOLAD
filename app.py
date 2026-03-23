@@ -54,6 +54,7 @@ CLIMATE_STATS   = REPO_ROOT / "data" / "norm_climate_stats.json"
 GMM_PATH       = REPO_ROOT / "data" / "regime_gmm.json"   # needed by generate.py for class_frequencies
 
 # Utils physics should be also in the data folder 
+
 # All required files - used for startup sanity check
 REQUIRED_FILES: list = [
     CONFIG_PATH,
@@ -1100,38 +1101,30 @@ with col_text:
     <span class='amb'>D</span>iffusion Irradiance Timeseries Generator
   </div>
   <div class='prose' style='font-size:0.88rem;line-height:1.85;font-family:Courier New,Courier,monospace;text-align:justify;'>
-  Generates 10-min realistic synthetic solar irradiance time series at arbitrary locations
+  Generates 10-mmin realistic synthetic solar irradiance time series at arbitrary locations
   and date ranges - with no weather data, no sensors, and no observations required
-  at inference time. Coordinates and a date range are the only inputs.
-  Currently generates global irradiance; extensible to diffuse and direct channels.
+  at inference time. Coordinates and a date range are the only inputs. 
+  Currently, it generates global irradiance, but it can be extended to include both global and diffuse channels.
   <br><br>
-  This implementation is a research prototype trained exclusively on <strong>SURFRAD</strong>
-  ground measurements from seven stations spanning diverse North American climate regimes.
-  No auxiliary meteorological variables enter the model at any stage — only solar irradiance
+  This implementation is a research prototype and is not intended as a
+  production-ready tool. Trained exclusively on 3 years of <strong>SURFRAD</strong> ground measurements from
+  seven stations spanning diverse North American climate regimes. No auxiliary
+  meteorological variables enter the model at any stage — only solar irradiance
   records and their derived features. This deliberate minimalism isolates the
   contribution of the architecture and demonstrates that physically realistic
   sequences can be synthesised from solar measurements alone.
   <em>The guiding principle: use the minimum to learn, need the minimum to work.</em>
   <br><br>
-  The architecture combines a physics-conditioned VAE (Stage 1) with a Transformer
-  denoiser operating in latent τ-space (Stage 2). A <strong>site context embedding</strong>
-  encodes the location's Köppen climate class and irradiance quantiles — derived automatically
-  from coordinates — and biases the Transformer's self-attention to learn site-specific
-  day-to-day persistence patterns. This allows the model to generate sequences whose
-  regime transition dynamics adapt to the climatological character of any location,
-  not just the training stations.
-  <br><br>
-  The model generalises well to held-out years at stations within the training
-  distribution. Generalisation to climatologically distinct sites — tropical monsoon
-  zones, polar regions — is not guaranteed; the transition dynamics reflect the
-  North American training distribution. Fine-tuning on local ground measurements
-  is recommended for such sites.
-  <br><br>
+  The model generalises well to held-out sites and years.
+  Generalisation to climatologically distinct or out-of-distribution sites --
+  remote archipelagos, tropical monsoon zones -- is not guaranteed;
+  fine-tuning on a modest set of local ground measurements is recommended.
+  <br><br>  
   The architecture is designed to be extensible. Conditioning on historical
   observations, sky imagery, or richer inputs requires only a lightweight addition,
-  naturally extending the model into a forecaster or a prompt-driven generator.
-  Code, weights, and technical details are available in the accompanying GitHub
-  repository and research paper.
+  naturally extending the model into a forecaster or a prompt-driven generator — 
+  free-text scene descriptions as generation prompts. 
+  Code, weights, and technical details are available in the accompanying GitHub repository and research paper.
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1233,7 +1226,7 @@ if generate_btn:
         <line x1='16' y1='40' x2='9.5' y2='46.5' stroke='#e8b84b' stroke-width='2' stroke-linecap='round' opacity='0.2'/>
       </svg>
       <div class='loader-title'>Running SOLAD</div>
-<div class='loader-sub'>Generating — on GPU ~2–3 min per year; on CPU approximately 8–10 min</div>
+<<div class='loader-sub'>No GPU available - on CPU, generating one full year of data takes approximately 15 minutes</div>
 <div class='loader-sub' style='margin-top:0.4rem;color:#e8b84b;letter-spacing:0.06em;'>
   {lat:.4f}&deg;&thinsp;N &nbsp;&middot;&nbsp; {lon:.4f}&deg;&thinsp;E &nbsp;&middot;&nbsp; {start_date} &rarr; {end_date} &nbsp;&middot;&nbsp; {n_days} days
 </div>
