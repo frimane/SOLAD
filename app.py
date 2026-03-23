@@ -1226,7 +1226,7 @@ if generate_btn:
         <line x1='16' y1='40' x2='9.5' y2='46.5' stroke='#e8b84b' stroke-width='2' stroke-linecap='round' opacity='0.2'/>
       </svg>
       <div class='loader-title'>Running SOLAD</div>
-<<div class='loader-sub'>No GPU available - on CPU, generating one full year of data takes approximately 15 minutes</div>
+<div class='loader-sub'>No GPU available - on CPU, generating one full year of data takes approximately 15 minutes</div>
 <div class='loader-sub' style='margin-top:0.4rem;color:#e8b84b;letter-spacing:0.06em;'>
   {lat:.4f}&deg;&thinsp;N &nbsp;&middot;&nbsp; {lon:.4f}&deg;&thinsp;E &nbsp;&middot;&nbsp; {start_date} &rarr; {end_date} &nbsp;&middot;&nbsp; {n_days} days
 </div>
