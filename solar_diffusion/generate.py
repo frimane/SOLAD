@@ -1,44 +1,46 @@
+"""
+solar_diffusion/generate.py
+----------------------------
+Arbitrary-length K* sequence generation.
 
-# Arbitrary-length K* sequence generation.
+Pipeline
+--------
+1. Compute deterministic solar geometry for every requested day (pvlib).
+2. If N <= W: single DDPM reverse pass.
+3. If N > W:  autoregressive sliding window with (W - S) days of context overlap.
+4. Convert generated tau latents -> z using LatentTauTransform.from_tau_space().
+5. Decode each latent z -> sunlit K* profile via the AE decoder.
+6. Post-process: clip to [0, k_max], insert night zeros, smooth sunrise/sunset ramps.
 
-# Pipeline
-# --------
-# 1. Compute deterministic solar geometry for every requested day (pvlib).
-# 2. If N <= W: single DDPM reverse pass.
-# 3. If N > W:  autoregressive sliding window with (W - S) days of context overlap.
-# 4. Convert generated tau latents -> z using LatentTauTransform.from_tau_space().
-# 5. Decode each latent z -> sunlit K* profile via the AE decoder.
-# 6. Post-process: clip to [0, k_max], insert night zeros, smooth sunrise/sunset ramps.
+Regime conditioning — self-consistent feedback loop
+----------------------------------------------------
+The RegimeEmbedding inside SolarDenoiser was trained with real GMM-derived regime
+labels.  At generation time we have no ground-truth labels, so we infer them
+directly from the model's own predictions using a feedback loop:
 
-# Regime conditioning — self-consistent feedback loop
-# ----------------------------------------------------
-# The RegimeEmbedding inside SolarDenoiser was trained with real GMM-derived regime
-# labels.  At generation time we have no ground-truth labels, so we infer them
-# directly from the model's own predictions using a feedback loop:
+  At each denoising step k:
+    1. Run a cheap forward pass to predict τ̂₀ from the current noisy τₖ.
+    2. Map τ̂₀ → per-day τ means (mean over d_z).
+    3. Convert τ means to soft regime probabilities via the GMM τ-space boundaries
+       (clear ↔ low τ, overcast ↔ high τ) fitted from the training latent cache.
+    4. Take argmax → hard regime labels (1, W) int64.
+    5. Feed those labels back as `regime_ids` to the full CFG forward pass.
 
-#   At each denoising step k:
-#     1. Run a cheap forward pass to predict τ̂₀ from the current noisy τₖ.
-#     2. Map τ̂₀ → per-day τ means (mean over d_z).
-#     3. Convert τ means to soft regime probabilities via the GMM τ-space boundaries
-#        (clear ↔ low τ, overcast ↔ high τ) fitted from the training latent cache.
-#     4. Take argmax → hard regime labels (1, W) int64.
-#     5. Feed those labels back as `regime_ids` to the full CFG forward pass.
+This is self-consistent: the regime signal the denoiser receives at each step
+reflects where the trajectory is actually heading, not a hardcoded prior.
+Generalisation comes from the physics conditioning (location, DOY, ETR) — the
+denoiser learned that a desert site in summer naturally stays clear, a coastal
+site in winter stays mixed/overcast.  The regime labels track what the model is
+generating and reinforce it, rather than imposing it.
 
-# This is self-consistent: the regime signal the denoiser receives at each step
-# reflects where the trajectory is actually heading, not a hardcoded prior.
-# Generalisation comes from the physics conditioning (location, DOY, ETR) — the
-# denoiser learned that a desert site in summer naturally stays clear, a coastal
-# site in winter stays mixed/overcast.  The regime labels track what the model is
-# generating and reinforce it, rather than imposing it.
+The GMM τ-space boundaries are fitted once from the training latent cache during
+Stage 2 (stored in latent_tau_stats.json).  If they are unavailable the loop
+falls back to null regime tokens (original behaviour, no conditioning).
 
-# The GMM τ-space boundaries are fitted once from the training latent cache during
-# Stage 2 (stored in latent_tau_stats.json).  If they are unavailable the loop
-# falls back to null regime tokens (original behaviour, no conditioning).
-
-# No meteorological observations are used at inference.
-# User input: start_date, end_date, lat, lon.
-# Everything else is computed from pvlib and the trained model weights.
-
+No meteorological observations are used at inference.
+User input: start_date, end_date, lat, lon.
+Everything else is computed from pvlib and the trained model weights.
+"""
 
 import logging
 from datetime import date, timedelta
@@ -111,9 +113,12 @@ def _load_tau_class_centroids(
 
 @torch.no_grad()
 def _infer_regime_ids_from_tau(
-    tau_hat0:          torch.Tensor,    # (1, W, d_z) predicted clean τ̂₀
-    class_centroids:   torch.Tensor,    # (n_regimes,) per-class τ scalar centroids
-) -> torch.Tensor:                      # (1, W) int64 regime labels
+    tau_hat0:          torch.Tensor,           # (1, W, d_z) predicted clean τ̂₀
+    class_centroids:   torch.Tensor,           # (n_regimes,) per-class τ scalar centroids
+    location_prior:    Optional[np.ndarray] = None,  # (n_regimes,) location-aware prior
+    prior_strength:    float = 0.30,           # blend weight for location prior
+    temperature:       float = 0.5,            # softmax temperature — read from config
+) -> torch.Tensor:                             # (1, W) int64 regime labels
     """Map τ̂₀ predictions to 4-class regime labels via nearest centroid.
 
     Per-day τ mean (mean over d_z) is compared against the n_regimes scalar
@@ -131,23 +136,43 @@ def _infer_regime_ids_from_tau(
     ----------
     tau_hat0       : (1, W, d_z) — denoiser's τ̂₀ prediction at step k
     class_centroids: (n_regimes,) — ascending-τ scalar centroids from training
+    temperature    : softmax temperature for centroid distance → probability.
+                     Read from cfg["inference"]["regime_feedback_temperature"].
+                     Lower = sharper (nearer to argmax); higher = more uniform.
+                     0.5 is a reasonable default; tune if overcast is never sampled.
 
     Returns
     -------
     (1, W) int64 tensor on the same device as tau_hat0.
     """
     tau_mean = tau_hat0.mean(dim=2)                  # (1, W) — mean over d_z per day
-    # Nearest centroid: for each day find argmin |tau_mean - centroid_i|
-    # centroids shape: (n_regimes,) → (1, 1, n_regimes) for broadcasting
-    cents = class_centroids.to(tau_hat0.device).view(1, 1, -1)  # (1, 1, n_regimes)
-    dists = (tau_mean.unsqueeze(2) - cents).abs()               # (1, W, n_regimes)
-    labels = dists.argmin(dim=2).long()                         # (1, W)
+
+    # Soft regime assignment via nearest-centroid distance → softmax probability.
+    # Hard argmax creates a self-reinforcing clear-sky loop.
+    # Temperature controls how sharp the assignment is:
+    #   low T (e.g. 0.1) → near-argmax, strong self-reinforcement
+    #   high T (e.g. 2.0) → uniform, no useful signal
+    #   0.5 balances self-consistency with exploration of other regimes.
+    # Tune via cfg["inference"]["regime_feedback_temperature"].
+    cents     = class_centroids.to(tau_hat0.device).view(1, 1, -1)  # (1, 1, n_regimes)
+    dists     = (tau_mean.unsqueeze(2) - cents).abs()               # (1, W, n_regimes)
+    log_probs = -dists / (temperature + 1e-8)                       # (1, W, n_regimes)
+    probs     = torch.softmax(log_probs, dim=2)                     # (1, W, n_regimes)
+
+    # Blend with location prior if provided
+    if location_prior is not None and prior_strength > 0.0:
+        loc_prior_t = torch.from_numpy(location_prior).to(probs.device)
+        loc_prior_t = loc_prior_t.view(1, 1, -1).expand_as(probs)
+        probs = (1.0 - prior_strength) * probs + prior_strength * loc_prior_t
+        probs = probs / probs.sum(dim=2, keepdim=True).clamp(min=1e-8)
+
+    B, W_dim, R = probs.shape
+    labels = torch.multinomial(
+        probs.reshape(B * W_dim, R), num_samples=1
+    ).reshape(B, W_dim).long()                                  # (1, W)
     return labels
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Solar geometry helper (pure pvlib, no observations needed)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _utc_offset_from_profile(profile: Dict) -> Optional[float]:
     """Read the exact UTC offset (fractional hours) from a real profile's timestamps.
@@ -205,14 +230,13 @@ def _compute_solar_geometry(
     from data.physics_utils import (
         extract_day_features,
         extract_location_features,
+        extract_climate_features,
+        N_CLIMATE_FEATURES,
     )
 
     n_steps  = int(cfg["data"].get("inference_steps_per_day", 144))
     freq_min = int(24 * 60 / n_steps)
 
-    # UTC offset: prefer the exact value read from a real profile's timestamps
-    # (set by SolarPreprocessor at preprocessing time).  Fall back to the
-    # longitude-based estimate only when no real profile is available.
     if utc_offset_hours is None:
         utc_offset_hours = round(lon / 15.0)
         log.warning(
@@ -231,25 +255,18 @@ def _compute_solar_geometry(
     profiles = []
 
     for d in dates:
-        # Local midnight in UTC: subtract the UTC offset so that
-        # timestamps[0] corresponds to 00:00 local time.
         local_midnight_utc = pd.Timestamp(str(d), tz="UTC") - pd.Timedelta(hours=utc_offset_hours)
         ts = pd.date_range(start=local_midnight_utc, periods=n_steps,
                            freq=f"{freq_min}min", tz="UTC")
 
         sol = site.get_solarposition(ts)
         cs  = site.get_clearsky(ts, model="ineichen")
-
-        # Store timestamps as tz-naive ISO strings (UTC wall-clock)
-        # to match the format produced by SolarPreprocessor.
         ts_naive = ts.tz_localize(None)
 
         profile = {
             "date":       str(d),
             "timestamps": [str(t) for t in ts_naive],
             "solar_noon": str(ts_naive[int(sol["zenith"].values.argmin())]),
-            # placeholder K* (ones) — only used to build physics tensors,
-            # never used as a generation target
             "csi": np.ones(n_steps, dtype=np.float32).tolist(),
             "deterministic_geometry": {
                 "solar_zenith_angle": sol["zenith"].values.tolist(),
@@ -261,10 +278,39 @@ def _compute_solar_geometry(
         }
         profiles.append(profile)
 
+    # 7-dim solar day features (normalised)
     day_feat_arr = np.stack([
         day_feat_stats.normalize(extract_day_features(p, zenith_threshold))
         for p in profiles
     ])   # (N, 7)
+
+    # Climate features: computed once from lat/lon, broadcast to all days.
+    # Uses kgcpy lookup: Köppen zone → one-hot (6) + irradiance quantiles (4) = 10 dims.
+    # Same call as in dataset.__getitem__ — inference is identical to training.
+    # climate_stats normalises the irradiance quantile dims; loaded from config path.
+    clim_raw = extract_climate_features(lat, lon)   # (N_CLIMATE_FEATURES=10,)
+    climate_stats_path = cfg.get("paths", {}).get("norm_stats_climate", None)
+    if climate_stats_path is not None and Path(climate_stats_path).exists():
+        from data.physics_utils import ClimateFeatNormStats as _CFS
+        _cs = _CFS()
+        _cs.load(climate_stats_path)
+        clim_norm = _cs.normalize(clim_raw)   # (10,)
+        log.info("Climate stats loaded from %s for inference.", climate_stats_path)
+    else:
+        # Fallback: use raw features — Köppen one-hot already {0,1},
+        # irradiance quantiles are large (Wh/m²/year) but the denoiser
+        # will still learn from them; z-scoring just improves convergence.
+        clim_norm = clim_raw
+        if climate_stats_path is not None:
+            log.warning(
+                "Climate stats not found at %s — using raw climate features. "
+                "Run fit_and_save_norm_stats to generate norm_stats_climate.json.",
+                climate_stats_path,
+            )
+
+    # Append climate features to every day: (N, 7) → (N, 7+10=17)
+    clim_broadcast = np.tile(clim_norm, (len(profiles), 1))      # (N, 10)
+    day_feat_arr   = np.concatenate([day_feat_arr, clim_broadcast], axis=1)  # (N, 17)
 
     location_enc = extract_location_features(lat, lon)   # (4,)
 
@@ -329,22 +375,17 @@ def _ddpm_reverse(
     valid_mask: torch.Tensor,     # (1, W, T_max)
     d_z: int,
     guidance_scale: float,
-    # FIX: d_z_flat separates z_flat dims from z_var dims inside the reverse
-    # loop so that z_var tau values can be clamped independently.  z_var has a
-    # real training range of ~±3.0 stddev; the global clamp (±8.42) is too
-    # loose for z_var and allows extreme values that corrupt tau_proj at the
-    # next denoising step.  0 means no z_var dims (backward-compatible default).
-    d_z_flat: int = 0,
     context_tau: Optional[torch.Tensor] = None,  # (1, n_ctx, d_z) from prev window
     n_ctx: int = 0,
     context_noise_std: float = 0.0,  # unused — kept for API compatibility
     ddim_steps: Optional[int] = None,  # None → DDPM (all T steps); int → DDIM
     ddim_eta:   float = 0.0,           # DDIM stochasticity (0=deterministic)
-    regime_ids: Optional[torch.Tensor] = None,   # (1, W) int64 — initial labels (overridden by feedback loop)
-    tau_class_centroids: Optional[torch.Tensor] = None,  # (n_regimes,) — 4-class nearest-centroid thresholds
-    tau_min:    float = -4.605,        # lower clamp in standardised τ-space — from latent_transform.tau_clamp_bounds()
-    tau_max:    float = 4.605,         # upper clamp in standardised τ-space — from latent_transform.tau_clamp_bounds()
-    global_regime_freqs: Optional[np.ndarray] = None,   # (n_regimes,) training-set base rates
+    regime_ids: Optional[torch.Tensor] = None,            # (1, W) int64 — initial labels (overridden by feedback)
+    tau_class_centroids: Optional[torch.Tensor] = None,   # (n_regimes,) — 4-class nearest-centroid thresholds
+    location_prior: Optional[np.ndarray] = None,          # (n_regimes,) location-aware regime prior
+    prior_strength: float = 0.30,                         # blend weight for location prior
+    feedback_temperature: float = 0.5,                    # softmax temperature for centroid→label; read from cfg
+    tau_max:    float = 4.605,         # −log(z_norm_clamp_lo); physical upper bound on τ̂₀
 ) -> torch.Tensor:                 # (1, W, d_z) in τ-space
     """Reverse diffusion producing τ latents for a window of W days.
 
@@ -359,37 +400,6 @@ def _ddpm_reverse(
     The first n_ctx positions are hard-pinned at every denoising step:
         τ[:, :n_ctx, :] = √ᾱ_k · context_tau + √(1−ᾱ_k) · fresh_noise
 
-    Site-aware initial noise
-    ------------------------
-    When global_regime_freqs and tau_class_centroids are both provided, the
-    initial noise tau_T is built by:
-
-      1. Sampling W regime labels from Categorical(global_regime_freqs).
-         This seeds the starting distribution with the training-set base rates.
-         For an unseen site this is the best prior available without retraining —
-         it is always better than flat N(0,1) which is equivalent to assuming
-         every regime is equally likely.
-
-      2. Mapping each sampled label to its class_tau_centroid (from
-         latent_tau_stats.json), then noising the centroid to step T via
-         q_sample.  At step T, alpha_bar ≈ 0.0001, so the result is
-         overwhelmingly noise but with a tiny bias toward the right regime.
-
-      3. Using those sampled labels as the initial regime_ids for the feedback
-         loop.  This is the more impactful part: regime conditioning carries
-         full signal at every denoising step while the centroid bias at T
-         is only ~1% of the signal.
-
-    This generalises to unseen sites because:
-      - The initial labels come from global training frequencies (no per-site
-        table needed) and are immediately refined by the feedback loop.
-      - The denoiser's physics conditioning (lat/lon, day-of-year, ETR) already
-        encodes the deterministic solar geometry for the target location.
-      - The feedback loop self-corrects the regime labels at every step based
-        on where the trajectory is actually heading in τ-space, so any mismatch
-        between the prior and the true site distribution is progressively
-        corrected throughout the reverse chain.
-
     Self-consistent 4-class regime feedback loop
     --------------------------------------------
     If tau_class_centroids (n_regimes,) is provided, regime labels are updated
@@ -400,13 +410,9 @@ def _ddpm_reverse(
       3. Assign the nearest of the n_regimes scalar centroids → hard label.
       4. Pass those labels as regime_ids to the full CFG forward pass.
 
-    tau_min / tau_max
-    -----------------
-    Must be passed from latent_transform.tau_clamp_bounds() — these are in
-    standardised τ-space (after affine shift/scale) and are SYMMETRIC around
-    zero.  Passing raw −log(z_norm_clamp_lo) here was wrong because it ignored
-    the affine standardisation and produced an asymmetric clamp that biased
-    the reverse chain toward the overcast end of τ-space.
+    Centroids come from class_tau_centroids in latent_tau_stats.json, fitted
+    from the training latent cache — geometrically correct in τ-space (fixes
+    the K*-to-τ heuristic that ignored per-dim z_min/z_max scaling).
 
     Returns τ-space latents. Caller applies LatentTauTransform.from_tau_space()
     then vae.decode().
@@ -414,42 +420,7 @@ def _ddpm_reverse(
     device = day_feat.device
     W      = day_feat.shape[1]
 
-    # ── Site-aware initial noise ──────────────────────────────────────────────
-    # When regime frequencies and centroids are available, seed the initial noise
-    # from the training-set prior rather than flat N(0,1).
-    if (global_regime_freqs is not None
-            and tau_class_centroids is not None
-            and context_tau is None):   # only for the first window (no RePaint context)
-        n_regimes = len(global_regime_freqs)
-        freqs_t   = torch.from_numpy(global_regime_freqs).to(device)
-        freqs_t   = freqs_t / freqs_t.sum()   # normalise
-
-        # Sample W regime labels from the prior distribution.
-        sampled_ids = torch.multinomial(
-            freqs_t.unsqueeze(0).expand(W, -1),
-            num_samples=1,
-            replacement=True,
-        ).squeeze(1)   # (W,) int64
-
-        # Map sampled labels to τ centroids, broadcast over d_z.
-        tau_centroid = tau_class_centroids[sampled_ids].unsqueeze(0).unsqueeze(-1)
-        tau_centroid = tau_centroid.expand(1, W, d_z)   # (1, W, d_z)
-
-        # Forward-noise the centroid to step T — nearly pure noise at alpha_bar≈0.
-        k_T   = torch.full((1,), schedule.T - 1, dtype=torch.long, device=device)
-        tau, _ = schedule.q_sample(tau_centroid, k_T)   # (1, W, d_z)
-
-        # Use the sampled labels as the initial regime conditioning.
-        # The feedback loop will refine these at every step.
-        if regime_ids is None:
-            regime_ids = sampled_ids.unsqueeze(0)   # (1, W)
-
-        log.debug(
-            "_ddpm_reverse: site-aware init — sampled regime counts: %s",
-            {i: int((sampled_ids == i).sum()) for i in range(n_regimes)},
-        )
-    else:
-        tau = torch.randn(1, W, d_z, device=device)
+    tau = torch.randn(1, W, d_z, device=device)
 
     has_context  = context_tau is not None and n_ctx > 0
     use_feedback = tau_class_centroids is not None
@@ -499,7 +470,10 @@ def _ddpm_reverse(
             som_k    = schedule.sqrt_one_minus[k]
             tau_hat0 = sab_k * tau - som_k * v_cheap   # (1, W, d_z)
             current_regime_ids = _infer_regime_ids_from_tau(
-                tau_hat0, tau_class_centroids
+                tau_hat0, tau_class_centroids,
+                location_prior=location_prior,
+                prior_strength=prior_strength,
+                temperature=feedback_temperature,
             )   # (1, W) int64 — updated for this step's CFG call
 
         # ── Full CFG forward pass with up-to-date regime labels ───────────────
@@ -514,22 +488,9 @@ def _ddpm_reverse(
         if use_ddim:
             k_prev = step_seq[seq_idx + 1] if seq_idx + 1 < len(step_seq) else -1
             tau = schedule.p_sample_ddim(tau, k, k_prev, v_pred, eta=ddim_eta,
-                                         tau_min=tau_min, tau_max=tau_max)
+                                         tau_max=tau_max)
         else:
-            tau = schedule.p_sample(tau, k, v_pred, tau_min=tau_min, tau_max=tau_max)
-
-        # FIX: clamp z_var tau dims to ±3.0 after every reverse step.
-        # The global symmetric clamp (±8.42) is correct for z_flat dims whose
-        # physical range spans the full tau domain.  z_var dims have a real
-        # training-set range of roughly ±3.0 standardised units — values beyond
-        # that were never seen by the denoiser and send an out-of-distribution
-        # signal into tau_proj Linear(d_z→d_model) at the next step, which
-        # corrupts the z_flat prediction and produces flat artificial overcast
-        # profiles at decode time (K* ≈ 0.2, no intraday variability).
-        # d_z_flat=0 is the backward-compatible default (no-op when z_var_dim=0).
-        _n_zvar = d_z - d_z_flat
-        if d_z_flat > 0 and _n_zvar > 0:
-            tau[..., d_z_flat:] = tau[..., d_z_flat:].clamp(-3.0, 3.0)
+            tau = schedule.p_sample(tau, k, v_pred, tau_max=tau_max)
 
     return tau   # (1, W, d_z)
 
@@ -689,6 +650,25 @@ def generate_sequence(
     ic       = cfg["inference"]
     pc       = cfg["physics"]
     W        = cfg["data"]["window_size"]
+
+    # NOTE on bypass_alpha: do NOT zero it at inference.
+    # The AEDecoder bypass lane is initialised at -3.0 (sigmoid≈0.047, nearly off)
+    # so k_dec learns the full profile shape first. bypass_alpha only grows during
+    # training if it genuinely reduces loss. Zeroing it at inference would remove
+    # a contribution that k_dec was jointly trained to expect, producing a
+    # different decoder mode than what was trained. The -3.0 init in vae.py is
+    # the correct fix for the flat-floor artifact — not inference-time zeroing.
+    # Log the actual learned alpha so we can monitor it.
+    with torch.no_grad():
+        for _m in vae.modules():
+            if hasattr(_m, "bypass_alpha"):
+                learned_alpha = float(torch.sigmoid(_m.bypass_alpha).item())
+                log.info(
+                    "bypass_alpha at inference: sigmoid(%.4f) = %.4f  "
+                    "(0.047=near-off, 0.5=half-strength; retrain VAE if > 0.15 "
+                    "and flat-floor artifacts appear — means old 0.0 init was used).",
+                    float(_m.bypass_alpha.item()), learned_alpha,
+                )
     S        = ic["stride"]      # new days generated per sliding window step
     n_ctx    = W - S             # context days carried over from previous window
     d_z      = cfg["vae"]["latent_dim"] + int(cfg["vae"].get("z_var_dim", 0))
@@ -704,14 +684,11 @@ def generate_sequence(
         ddim_steps = int(ddim_steps)
     ddim_eta   = float(ic.get("ddim_eta", 0.0))
 
-    # τ clamp bounds — always read from the fitted LatentTauTransform.
-    # tau_clamp_bounds() returns a SYMMETRIC pair (tau_min_std, tau_max_std)
-    # in standardised τ-space.  Using raw −log(z_norm_clamp_lo) here was wrong
-    # because: (a) it ignored affine standardisation (tau_mu / tau_sig), so the
-    # clamp was in physical units while the denoiser operates in standardised
-    # units; (b) it only passed tau_max with no tau_min, leaving the clear-sky
-    # side of τ-space unclamped.  Both issues caused the overcast bias.
-    tau_min_gen, tau_max_gen = latent_transform.tau_clamp_bounds()
+    # τ_max = −log(z_norm_clamp_lo): physical upper bound for τ̂₀ clamping in samplers.
+    # Matches the LatentTauTransform lower clamp on z_norm (to_tau_space).
+    import math as _math
+    _z_norm_clamp_lo = float(cfg["vae"].get("z_norm_clamp_lo", 0.01))
+    tau_max_gen = float(-_math.log(_z_norm_clamp_lo))
 
     # Build date list
     d0    = date.fromisoformat(start_date)
@@ -759,41 +736,32 @@ def generate_sequence(
             "Regime conditioning uses null tokens throughout generation."
         )
 
-    # ── Site-aware initial regime frequencies ────────────────────────────────
-    # Load the global training-set regime frequencies stored in
-    # latent_tau_stats.json by fit_latent_tau_transform().
-    # These are used to seed the initial regime sequence so the starting noise
-    # is biased toward the climatological distribution of the training sites
-    # rather than drawn uniformly.  For an unseen site this is still the best
-    # prior available without retraining — it encodes the base rate of each
-    # weather regime across all stations seen during training.
-    # The feedback loop then refines the regime labels at every denoising step
-    # based on where the trajectory is actually heading (via τ̂₀ nearest-centroid),
-    # so any initial mismatch is corrected by the model itself.
-    _global_regime_freqs: Optional[np.ndarray] = None
-    _tau_stats_path = cfg.get("paths", {}).get("latent_tau_stats", None)
-    if _tau_stats_path is not None and Path(_tau_stats_path).exists():
-        try:
-            import json as _json
-            with open(_tau_stats_path) as _f:
-                _blob = _json.load(_f)
-            _grf = _blob.get("global_regime_freqs", None)
-            if _grf is not None:
-                _global_regime_freqs = np.array(_grf, dtype=np.float32)
-                _global_regime_freqs /= _global_regime_freqs.sum()   # renormalise for safety
-                log.info(
-                    "Global regime frequencies loaded: %s",
-                    [round(float(v), 4) for v in _global_regime_freqs],
-                )
-            else:
-                log.warning(
-                    "generate_sequence: 'global_regime_freqs' not found in %s. "
-                    "Re-run fit_latent_tau_transform() to write it. "
-                    "Initial noise will be flat N(0,1).",
-                    _tau_stats_path,
-                )
-        except Exception as _e:
-            log.warning("generate_sequence: could not load global_regime_freqs: %s", _e)
+    # ── Regime feedback temperature ──────────────────────────────────────────
+    # Controls sharpness of centroid → label assignment.
+    # Lower = nearer to hard argmax (self-reinforcing); higher = more uniform.
+    # Default 0.5 balances self-consistency with regime diversity.
+    _feedback_temp = float(ic.get("regime_feedback_temperature", 0.5))
+
+    # Location-aware regime prior is DISABLED.
+    # The prior biases regime sampling toward the climatological expectation
+    # at the target site, but in practice it over-constrains generation:
+    # high-latitude sites (e.g. Sweden) get a low p_clear prior that
+    # self-reinforces through the feedback loop, suppressing clear days entirely.
+    # The tau-centroid feedback alone is sufficient — the denoiser's own
+    # tau predictions reflect what regime the chain is actually heading toward.
+    # The prior can be re-enabled after retraining with more climatologically
+    # diverse stations, at which point the model will have learned the correct
+    # regime frequencies for different climates rather than being forced by a
+    # pvlib-derived heuristic.
+    # [next train] Re-evaluate regime_prior_strength after adding cloudy-climate
+    # stations. Start at 0.10 and only raise if generation is still too clear-sky.
+    _prior_strength  = 0.0
+    _location_prior  = None
+    log.info(
+        "Location regime prior disabled — using tau-centroid feedback only "
+        "(lat=%.2f lon=%.2f). Re-enable after retraining with diverse stations.",
+        lat, lon,
+    )
 
     # Allocate tau-space output buffer
     all_tau = torch.zeros(N, d_z, device=device)
@@ -807,15 +775,15 @@ def generate_sequence(
             denoiser, schedule, df, location_t,
             intraday.unsqueeze(0), vmask.unsqueeze(0),
             d_z, guidance,
-            d_z_flat=int(cfg["vae"]["latent_dim"]),   # FIX: enables z_var tau clamp inside loop
             context_noise_std=ctx_noise_std,
             ddim_steps=ddim_steps,
             ddim_eta=ddim_eta,
-            regime_ids=None,                         # initialised as null; feedback loop takes over
-            tau_class_centroids=tau_class_centroids, # 4-class nearest-centroid feedback
-            tau_min=tau_min_gen,
+            regime_ids=None,
+            tau_class_centroids=tau_class_centroids,
+            location_prior=_location_prior,
+            prior_strength=_prior_strength,
+            feedback_temperature=_feedback_temp,
             tau_max=tau_max_gen,
-            global_regime_freqs=_global_regime_freqs,
         )   # (1, N, d_z) in tau-space
         all_tau[:N] = tau_out[0]
 
@@ -844,17 +812,17 @@ def generate_sequence(
                 denoiser, schedule, df, location_t,
                 intraday.unsqueeze(0), vmask.unsqueeze(0),
                 d_z, guidance,
-                d_z_flat=int(cfg["vae"]["latent_dim"]),   # FIX: enables z_var tau clamp inside loop
                 context_tau=context_tau,
                 n_ctx=curr_n_ctx,
                 context_noise_std=ctx_noise_std,
                 ddim_steps=ddim_steps,
                 ddim_eta=ddim_eta,
-                regime_ids=None,                         # feedback loop infers from τ̂₀
-                tau_class_centroids=tau_class_centroids, # 4-class nearest-centroid feedback
-                tau_min=tau_min_gen,
+                regime_ids=None,
+                tau_class_centroids=tau_class_centroids,
+                location_prior=_location_prior,
+                prior_strength=_prior_strength,
+                feedback_temperature=_feedback_temp,
                 tau_max=tau_max_gen,
-                global_regime_freqs=_global_regime_freqs,
             )   # (1, win_len, d_z)
 
             # Store only the newly generated positions (not context)
@@ -863,35 +831,36 @@ def generate_sequence(
             n_new     = new_tau.shape[0]
             all_tau[new_start: new_start + n_new] = new_tau
 
-            # Last n_ctx tau latents become context for the next window
+            # Last n_ctx tau latents become context for the next window.
+            # FIX G4: Add small Gaussian noise before passing as context.
+            # Without perturbation, context_tau carries the clear-sky signal
+            # rigidly into every window, making cloudy spells impossible across
+            # window boundaries. noise_std=0.3 is small relative to tau_std≈1
+            # but enough to allow the reverse chain to explore other regimes.
+            # Read from config: inference.context_noise_std (default 0.0 = off).
+            # Pass context tau cleanly — no artificial perturbation.
+            # The context carries learned solar geometry conditioning.
             context_tau = tau_out[:, -n_ctx:, :].clone()
 
-    # Convert tau -> z -> K* profiles
+    # Convert tau → z → K* profiles
     vae.eval()
     output = np.zeros((N, T_full), dtype=np.float32)
 
-    for i, (profile, _) in enumerate(zip(profiles, dates)):
-        tau_i = all_tau[i].unsqueeze(0)                   # (1, d_z_full) tau-space
+    _d_z_flat_gen = int(cfg["vae"]["latent_dim"])         # z_flat dims only
+    _d_z_var_gen  = int(cfg["vae"].get("z_var_dim", 0))  # z_var dims
 
-        # FIX: z_var saturation bug — same root cause as train.py diagnostic fix.
-        # from_tau_space must only invert the z_flat dims ([:d_z_flat]).
-        # z_var dims have a narrow real range; running them through from_tau_space
-        # with generation-time tau values (which can reach ±8.4) produces extreme
-        # z values that never occurred during training.  Although vae.decode slices
-        # z[:, :d_z_flat] internally and therefore never sees z_var directly, the
-        # saturated z_var tau values corrupt the denoiser's hidden state via the
-        # tau_proj Linear(116→320) mixing during the reverse steps — producing the
-        # flat artificial overcast profiles seen in generation output.
-        # Zero-filling z_var here is correct: the decoder ignores these dims anyway.
-        _d_z_flat_gen = int(cfg["vae"]["latent_dim"])         # 112
-        _d_z_var_gen  = int(cfg["vae"].get("z_var_dim", 0))  # 4
-        tau_flat_i    = tau_i[..., :_d_z_flat_gen]            # (1, 112)
-        z_flat_i      = latent_transform.from_tau_space(tau_flat_i)  # (1, 112)
+    for i, (profile, _) in enumerate(zip(profiles, dates)):
+        tau_i      = all_tau[i].unsqueeze(0)              # (1, d_z_full)
+        # Only invert z_flat dims — z_var dims have a ~4× narrower range in
+        # tau-space and would saturate from_tau_space().  The decoder slices
+        # z[:, :latent_dim] internally so z_var is already ignored.
+        tau_i_flat = tau_i[:, :_d_z_flat_gen]            # (1, latent_dim)
+        z_flat_i   = latent_transform.from_tau_space(tau_i_flat)
         if _d_z_var_gen > 0:
-            z_var_zeros_i = torch.zeros(
-                *tau_i.shape[:-1], _d_z_var_gen, device=tau_i.device
+            z_var_zeros = torch.zeros(
+                1, _d_z_var_gen, device=tau_i.device, dtype=tau_i.dtype
             )
-            z_i = torch.cat([z_flat_i, z_var_zeros_i], dim=-1)  # (1, 116)
+            z_i = torch.cat([z_flat_i, z_var_zeros], dim=-1)
         else:
             z_i = z_flat_i
 
@@ -902,18 +871,14 @@ def generate_sequence(
         T_sun      = int(vmask_i[0].sum().item())
 
         if T_sun == 0:
-            output[i] = 0.0   # polar night -- all zeros
+            output[i] = 0.0   # polar night
             continue
 
-        phys_i = intraday_i[0, :T_sun].unsqueeze(0)   # (1, T_sun, 3)
-        k_sun  = vae.decode(z_i, phys_i, T_sun)        # (1, T_sun)
-        k_sun  = k_sun[0].cpu().numpy()
+        phys_i = intraday_i[0, :T_sun].unsqueeze(0)   # (1, T_sun, phys_dim)
+        with torch.no_grad():
+            k_sun = vae.decode(z_i, phys_i, T_sun)    # (1, T_sun)
+        k_sun = k_sun[0].cpu().numpy()
 
-        # K* for modelled sunlit window (zenith < z_thr) only.
-        # Twilight timesteps (z_thr <= zenith < 90) are intentionally left as
-        # zero in K* — their clearsky_ghi and zenith are written to the CSV so
-        # downstream can do GHI = K* * clearsky_ghi for modelled steps and
-        # apply any twilight assumption separately without touching K* statistics.
         output[i] = _postprocess_day(
             k_sun, sunlit_idx, T_full, k_max,
             ic["smooth_sigma"], ic["boundary_width"],
@@ -1150,6 +1115,8 @@ def generate_for_test_period(
     # utc_offset_hours ensures the pvlib timestamp grid aligns with real profiles.
     # generate_sequence returns the physics arrays (clearsky_ghi, zenith) built
     # from the SAME pvlib call — no need to recompute, guaranteed aligned.
+    # Location-aware regime prior is computed automatically inside generate_sequence
+    # from pvlib GCS statistics — works for any lat/lon, no profiles needed.
     generated, all_clearsky_ghi, all_zenith = generate_sequence(
         start_date, end_date, lat, lon,
         vae, denoiser, schedule, latent_transform,

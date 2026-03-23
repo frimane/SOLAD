@@ -1,57 +1,60 @@
-# SOLAD · Solar Irradiance Timeseries Generator
+# SOLAD - Solar Irradiance Timeseries Generator
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # STDLIB IMPORTS
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 import io
 import logging
 import random
 from datetime import date, timedelta
 from pathlib import Path
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # THIRD-PARTY IMPORTS
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
-import pandas as pd                   # top-level — no more deferred import inside build_csv
+import pandas as pd                   # top-level - no more deferred import inside build_csv
 import streamlit as st
 import streamlit.components.v1 as components
 import torch
 import yaml
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # LOCAL / PROJECT IMPORTS  (kept deferred inside cached loaders to avoid
-# circular-import issues at Streamlit startup — listed here for visibility)
-#   data.physics_utils              → IntraDayNormStats, DayFeatureNormStats
-#   solar_diffusion.vae             → SolarVAE
-#   solar_diffusion.denoiser        → SolarDenoiser
-#   solar_diffusion.optical_depth   → LatentTauTransform, TauNoiseSchedule
-#   solar_diffusion.generate        → generate_sequence
-#   scipy.stats                     → gaussian_kde  (inside plot_statistics)
-# ═════════════════════════════════════════════════════════════════════════════
+# circular-import issues at Streamlit startup - listed here for visibility)
+#   data.physics_utils              - IntraDayNormStats, DayFeatureNormStats
+#   solar_diffusion.vae             - SolarVAE
+#   solar_diffusion.denoiser        - SolarDenoiser
+#   solar_diffusion.optical_depth   - LatentTauTransform, TauNoiseSchedule
+#   solar_diffusion.generate        - generate_sequence
+#   scipy.stats                     - gaussian_kde  (inside plot_statistics)
+# ==============================================================================
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # APP METADATA
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 APP_VERSION = "v1.0.0"
 
-# ═════════════════════════════════════════════════════════════════════════════
-# FILE PATHS  —  every path lives here; nowhere else in this file
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# FILE PATHS  -  every path lives here; nowhere else in this file
+# ==============================================================================
 REPO_ROOT      = Path(__file__).parent
 CONFIG_PATH    = REPO_ROOT / "config.yaml"
 VAE_PATH       = REPO_ROOT / "inference_bundle" / "vae_weights.pt"
 DIFF_PATH      = REPO_ROOT / "inference_bundle" / "denoiser_weights.pt"
 TAU_PATH       = REPO_ROOT / "inference_bundle" / "latent_tau_stats.json"
-INTRADAY_STATS = REPO_ROOT / "data" / "norm_intraday.json"
-DAY_FEAT_STATS = REPO_ROOT / "data" / "norm_day_feat.json"
+INTRADAY_STATS  = REPO_ROOT / "data" / "norm_intraday.json"
+DAY_FEAT_STATS  = REPO_ROOT / "data" / "norm_day_feat.json"
+CLIMATE_STATS   = REPO_ROOT / "data" / "norm_climate_stats.json"
+GMM_PATH       = REPO_ROOT / "data" / "regime_gmm.json"   # needed by generate.py for class_frequencies
 
-# All required files — used for startup sanity check
+# Utils physics should be also in the data folder 
+# All required files - used for startup sanity check
 REQUIRED_FILES: list = [
     CONFIG_PATH,
     VAE_PATH,
@@ -59,21 +62,25 @@ REQUIRED_FILES: list = [
     TAU_PATH,
     INTRADAY_STATS,
     DAY_FEAT_STATS,
+    # GMM is optional — generate.py falls back gracefully if absent, but
+    # the location prior will use uniform cloudy sub-class split instead of
+    # real training frequencies. Warn rather than hard-fail if missing.
 ]
+OPTIONAL_FILES: list = [GMM_PATH]
 
-# ═════════════════════════════════════════════════════════════════════════════
-# INPUT VALIDATION CONSTANTS  — single source of truth for all bounds
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# INPUT VALIDATION CONSTANTS  - single source of truth for all bounds
+# ==============================================================================
 LAT_MIN,  LAT_MAX  = -90.0,   90.0
 LON_MIN,  LON_MAX  = -180.0, 180.0
 DATE_MIN           = date(2000,  1,  1)
 DATE_MAX           = date(2100, 12, 31)
-MAX_DAYS           = 730    # hard cap — refuses generation beyond this
+MAX_DAYS           = 730    # hard cap - refuses generation beyond this
 WARN_DAYS          = 365    # shows performance warning above this
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # MATPLOTLIB / LOGGING SETUP
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 plt.rcParams.update({
     "figure.dpi":          200,
     "savefig.dpi":         200,
@@ -98,9 +105,9 @@ plt.rcParams.update({
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # STATION METADATA
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 STATION_META = {
     "BON": {"lat": 40.05192,  "lon": -88.37309,  "name": "Bondville, IL",          "climate": "Humid continental"},
     "DRA": {"lat": 36.62373,  "lon": -116.01947, "name": "Desert Rock, NV",        "climate": "Hot desert"},
@@ -111,9 +118,9 @@ STATION_META = {
     "TBL": {"lat": 40.12498,  "lon": -105.23680, "name": "Table Mountain, CO",     "climate": "Semi-arid, high altitude"},
 }
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # MATPLOTLIB PALETTE
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 _P = dict(
     amber  = "#e8b84b",
     blue   = "#5b9bd5",
@@ -125,25 +132,25 @@ _P = dict(
     border = "#1a2e48",
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # PAGE CONFIG  (must come before any other st.* call)
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 st.set_page_config(
-    page_title="SOLAD — Solar Irradiance Generator",
+    page_title="SOLAD - Solar Irradiance Generator",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-# Viewport meta — critical for mobile rendering
+# Viewport meta - critical for mobile rendering
 st.markdown(
     '<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">',
     unsafe_allow_html=True,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # CSS
 # KEY: hide ALL streamlit chrome so position:fixed on .solad-nav works correctly
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&family=Syne:wght@400;500;600;700;800&display=swap');
@@ -169,7 +176,7 @@ st.markdown("""
     --t-md:  0.9375rem;
 }
 
-/* hide ALL streamlit chrome — required for position:fixed to work */
+/* hide ALL streamlit chrome - required for position:fixed to work */
 [data-testid="stSidebar"],
 [data-testid="stSidebarCollapseButton"],
 [data-testid="collapsedControl"],
@@ -198,7 +205,7 @@ html, body,
 section[data-testid="stMain"] > div { background: var(--bg0) !important; }
 .block-container { padding-top: 0 !important; }
 
-/* ── NAVBAR ── */
+/* -- NAVBAR -- */
 .solad-nav {
     position: fixed;
     top: 0; left: 0; right: 0;
@@ -258,7 +265,7 @@ section[data-testid="stMain"] > div { background: var(--bg0) !important; }
 }
 .solad-nav .nav-dot { width: 7px; height: 7px; background: #4caf7d; border-radius: 50%; }
 
-/* section anchor offset — compensates for fixed navbar */
+/* section anchor offset - compensates for fixed navbar */
 .section-anchor {
     display: block;
     height: 72px;
@@ -513,10 +520,10 @@ label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
 
 html { scroll-behavior: smooth !important; }
 
-/* title amber spans — more specific than the global span rule */
+/* title amber spans - more specific than the global span rule */
 #solad-title span.amb { color: #e8b84b !important; }
 
-/* About section — stretch columns to equal height */
+/* About section - stretch columns to equal height */
 [data-testid="stHorizontalBlock"] {
     align-items: stretch !important;
 }
@@ -530,7 +537,7 @@ html { scroll-behavior: smooth !important; }
     flex-direction: column !important;
 }
 
-/* ── MOBILE RESPONSIVENESS ── */
+/* -- MOBILE RESPONSIVENESS -- */
 @media (max-width: 768px) {
     /* navbar: wrap to two lines on mobile */
     .solad-nav {
@@ -640,9 +647,9 @@ html { scroll-behavior: smooth !important; }
 """, unsafe_allow_html=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # Model loaders  (local imports deferred inside cached functions)
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
 @st.cache_resource(show_spinner=False)
 def load_config():
@@ -651,10 +658,21 @@ def load_config():
 
 @st.cache_resource(show_spinner=False)
 def load_norm_stats(_cfg):
-    from data.physics_utils import IntraDayNormStats, DayFeatureNormStats
+    from data.physics_utils import IntraDayNormStats, DayFeatureNormStats, ClimateFeatNormStats
     ist = IntraDayNormStats(); ist.load(str(INTRADAY_STATS))
     dfs = DayFeatureNormStats(); dfs.load(str(DAY_FEAT_STATS))
-    return ist, dfs
+    # Climate stats — optional but needed for correct irradiance quantile scaling.
+    # If absent, generate.py falls back to raw features (safe but unscaled).
+    cs = None
+    if CLIMATE_STATS.exists():
+        cs = ClimateFeatNormStats(); cs.load(str(CLIMATE_STATS))
+    else:
+        log.warning(
+            "norm_climate_stats.json not found at %s — "
+            "climate features will be unscaled at inference. "
+            "Re-run training to generate this file.", CLIMATE_STATS,
+        )
+    return ist, dfs, cs
 
 @st.cache_resource(show_spinner=False)
 def load_models(_cfg):
@@ -662,6 +680,9 @@ def load_models(_cfg):
     from solar_diffusion.denoiser import SolarDenoiser
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     vae = SolarVAE(_cfg).to(device)
+    # inference_bundle/ contains clean state_dicts only (no optimizer, no epoch,
+    # no ema_shadow) — prepared by prepare_inference_bundle.py which strips all
+    # training metadata. weights_only=True is safe and correct here.
     vae.load_state_dict(torch.load(VAE_PATH, map_location=device, weights_only=True))
     vae.eval()
     dn = SolarDenoiser(_cfg).to(device)
@@ -683,9 +704,9 @@ def load_schedule_and_transform(_cfg):
     return sch, lt
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # INPUT VALIDATION
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
 def validate_inputs(lat, lon, start_date, end_date):
     """
@@ -699,7 +720,7 @@ def validate_inputs(lat, lon, start_date, end_date):
         lat_f = float(lat)
         if not (LAT_MIN <= lat_f <= LAT_MAX):
             errors.append(
-                f"Latitude {lat_f} is out of range. Must be between {LAT_MIN}° and {LAT_MAX}°."
+                f"Latitude {lat_f} is out of range. Must be between {LAT_MIN}\u00b0 and {LAT_MAX}\u00b0."
             )
     except (TypeError, ValueError):
         errors.append("Latitude must be a valid number.")
@@ -709,7 +730,7 @@ def validate_inputs(lat, lon, start_date, end_date):
         lon_f = float(lon)
         if not (LON_MIN <= lon_f <= LON_MAX):
             errors.append(
-                f"Longitude {lon_f} is out of range. Must be between {LON_MIN}° and {LON_MAX}°."
+                f"Longitude {lon_f} is out of range. Must be between {LON_MIN}\u00b0 and {LON_MAX}\u00b0."
             )
     except (TypeError, ValueError):
         errors.append("Longitude must be a valid number.")
@@ -737,21 +758,34 @@ def validate_inputs(lat, lon, start_date, end_date):
             n = (end_date - start_date).days + 1
             if n > MAX_DAYS:
                 errors.append(
-                    f"Date range spans {n} days — maximum allowed is {MAX_DAYS} days (~2 years). "
+                    f"Date range spans {n} days - maximum allowed is {MAX_DAYS} days (~2 years). "
                     "Please shorten the range."
                 )
 
     return errors
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # Generation helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
 def run_generation(lat, lon, start_date, end_date, cfg,
                    vae, denoiser, schedule, lt, ist, dfs, device):
     from solar_diffusion.generate import generate_sequence
-    cfg_rt = {**cfg, "paths": {**cfg.get("paths", {}), "output_csv": None}}
+    # Build a runtime config with all required paths resolved to absolute paths.
+    # generate_sequence reads climate stats from cfg["paths"]["norm_stats_climate"]
+    # internally — no need to pass cs directly.
+    # output_csv is set to None so nothing is written to disk during inference.
+    cfg_rt = {
+        **cfg,
+        "paths": {
+            **cfg.get("paths", {}),
+            "latent_tau_stats":   str(TAU_PATH),
+            "regime_gmm":         str(GMM_PATH) if GMM_PATH.exists() else cfg.get("paths", {}).get("regime_gmm", ""),
+            "norm_stats_climate": str(CLIMATE_STATS) if CLIMATE_STATS.exists() else "",
+            "output_csv":         None,
+        },
+    }
     gen, cs_ghi, zenith = generate_sequence(
         start_date=str(start_date), end_date=str(end_date),
         lat=float(lat), lon=float(lon),
@@ -763,7 +797,7 @@ def run_generation(lat, lon, start_date, end_date, cfg,
 
 
 def build_csv(gen, cs_ghi, zenith, dates, cfg):
-    # pandas is imported at the top of the file — no deferred import needed
+    # pandas is imported at the top of the file - no deferred import needed
     T = gen.shape[1]
     freq_min = int(24 * 60 / int(cfg["data"].get("inference_steps_per_day", 144)))
     rows = []
@@ -784,12 +818,12 @@ def build_csv(gen, cs_ghi, zenith, dates, cfg):
     return buf.getvalue().encode()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 # Matplotlib helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ==============================================================================
 
 def _ax_style(ax, title="", xlabel="", ylabel=""):
-    ax.set_facecolor("none")          # transparent — page bg shows through
+    ax.set_facecolor("none")          # transparent - page bg shows through
     ax.patch.set_visible(False)
     for sp in ax.spines.values():
         sp.set_edgecolor(_P["border"]); sp.set_linewidth(0.9)
@@ -909,15 +943,15 @@ def plot_statistics(stats, cfg):
     kmax=float(cfg["physics"]["k_max"])
     fig,axes=plt.subplots(1,3,figsize=(21,5.0))
     fig.patch.set_visible(False)
-    # ── panel 1: daily mean K* ────────────────────────────────────────────────
+    # -- panel 1: daily mean K* --
     ax=axes[0]; valid=~np.isnan(dm); x=np.where(valid)[0]; y=dm[valid]
     ax.fill_between(x,y,alpha=0.15,color=_P["amber"],lw=0)
     ax.plot(x,y,color=_P["amber"],lw=2.0,solid_capstyle="round")
     ax.axhline(0.70,color=_P["dim"],lw=1.0,ls=":",alpha=0.8)
     ax.text(len(dm)*0.01,0.72,"Clear threshold (0.70)",color=_P["dim"],fontsize=10,fontfamily="monospace",va="bottom")
     ax.set_xlim(0,max(len(dm)-1,1)); ax.set_ylim(0,1.35)
-    _ax_style(ax,"Daily mean K*  —  sunlit timesteps","Day index","K*")
-    # ── panel 2: KDE — Scott bw, 2000-pt grid for a perfectly smooth curve ──
+    _ax_style(ax,"Daily mean K*  -  sunlit timesteps","Day index","K*")
+    # -- panel 2: KDE - Scott bw, 2000-pt grid for a smooth curve --
     ax=axes[1]
     if len(ka)>20:
         kde=gaussian_kde(ka, bw_method="scott")
@@ -928,8 +962,8 @@ def plot_statistics(stats, cfg):
         ax.text(mk+0.015,float(np.max(ys))*0.90,f"mean = {mk:.3f}",
                 color=_P["blue"],fontsize=10,fontfamily="monospace",va="top")
     ax.set_xlim(0,kmax*1.05); ax.set_ylim(bottom=0)
-    _ax_style(ax,"K* distribution  —  kernel density estimate","K*  (clear-sky index)","Density")
-    # ── panel 3: intraday variogram ─────────────────────────────────────────────
+    _ax_style(ax,"K* distribution  -  kernel density estimate","K*  (clear-sky index)","Density")
+    # -- panel 3: intraday variogram --
     ax=axes[2]
     lags=[i+1 for i,v in enumerate(vg) if v is not None]
     vals=[v for v in vg if v is not None]
@@ -937,31 +971,64 @@ def plot_statistics(stats, cfg):
         ax.fill_between(lags,vals,alpha=0.12,color=_P["blue"],lw=0)
         ax.plot(lags,vals,color=_P["blue"],lw=2.0,marker="o",ms=4.5,mfc=_P["blue"],mec="none")
         ax.set_xlim(0.5,max(lags)+0.5); ax.set_ylim(bottom=0)
-    _ax_style(ax,"Intraday variogram  γ(h)  —  K*  (10-min lags)","Lag  (10-min steps)","γ(h)")
+    _ax_style(ax,"Intraday variogram \u03b3(h)  -  K*  (10-min lags)","Lag  (10-min steps)","\u03b3(h)")
     fig.tight_layout(pad=1.2)
     return fig
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # STARTUP: file existence check + model loading
-# ═════════════════════════════════════════════════════════════════════════════
-with st.spinner("Loading model weights…"):
+# ==============================================================================
+with st.spinner("Loading model weights..."):
     try:
         missing = [p for p in REQUIRED_FILES if not p.exists()]
         if missing:
             names = ", ".join(p.name for p in missing)
             raise FileNotFoundError(f"Required file(s) not found: {names}")
-        cfg                = load_config()
-        ist, dfs           = load_norm_stats(cfg)
-        vae, denoiser, dev = load_models(cfg)
-        schedule, lt       = load_schedule_and_transform(cfg)
+        cfg                    = load_config()
+        ist, dfs, cs           = load_norm_stats(cfg)
+        vae, denoiser, dev     = load_models(cfg)
+        schedule, lt           = load_schedule_and_transform(cfg)
+
+        # Warn on optional files — non-fatal, generation degrades gracefully.
+        _missing_optional = [p for p in OPTIONAL_FILES if not p.exists()]
+        if _missing_optional:
+            for _p in _missing_optional:
+                log.warning(
+                    "Optional file not found: %s — location prior will use "
+                    "uniform cloudy sub-class split instead of training frequencies.", _p,
+                )
+
+        # Warn if climate stats are missing — SiteContextEmbedding and climate
+        # features in day_features both require norm_climate_stats.json at inference.
+        if cs is None:
+            log.warning(
+                "norm_climate_stats.json not found — climate features will be "
+                "unscaled at inference. Generation will still run but climate "
+                "conditioning (Köppen zone + irradiance quantiles) will be degraded."
+            )
+
+        # Check bypass_alpha health
+        with torch.no_grad():
+            for _m in vae.modules():
+                if hasattr(_m, "bypass_alpha"):
+                    _alpha_val = float(torch.sigmoid(_m.bypass_alpha).item())
+                    if _alpha_val > 0.15:
+                        log.warning(
+                            "bypass_alpha=%.4f > 0.15 — VAE was trained with old 0.0 init. "
+                            "Flat-floor artifacts may appear on overcast days. "
+                            "Retrain VAE with bypass_alpha init=-3.0 to fix.", _alpha_val,
+                        )
+                    else:
+                        log.info("bypass_alpha=%.4f (healthy, < 0.15).", _alpha_val)
+
         _model_ok = True
     except Exception as e:
         _model_ok = False
         _model_err = str(e)
 
 if not _model_ok:
-    st.error(f"Model initialisation failed — {_model_err}")
+    st.error(f"Model initialisation failed - {_model_err}")
     st.stop()
 
 
@@ -1010,12 +1077,12 @@ components.html("""
 """, height=0)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 1 — ABOUT
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# SECTION 1 - ABOUT
+# ==============================================================================
 st.markdown('<a class="section-anchor" id="about"></a>', unsafe_allow_html=True)
 
-# ── Two-column About layout: left = text, right = map (top) + table (bottom) ──
+# -- Two-column About layout: left = text, right = map (top) + table (bottom) --
 col_text, col_right = st.columns([1.2, 1], gap="medium")
 
 with col_text:
@@ -1033,43 +1100,51 @@ with col_text:
     <span class='amb'>D</span>iffusion Irradiance Timeseries Generator
   </div>
   <div class='prose' style='font-size:0.88rem;line-height:1.85;font-family:Courier New,Courier,monospace;text-align:justify;'>
-  Generates realistic synthetic solar irradiance time series at arbitrary locations
-  and date ranges — with no weather data, no sensors, and no observations required
-  at inference time. Coordinates and a date range are the only inputs. 
-  Currently, it generates global irradiance, but it can be easily extended to include both global and diffuse channels.
+  Generates 10-min realistic synthetic solar irradiance time series at arbitrary locations
+  and date ranges - with no weather data, no sensors, and no observations required
+  at inference time. Coordinates and a date range are the only inputs.
+  Currently generates global irradiance; extensible to diffuse and direct channels.
   <br><br>
-  This implementation is a research prototype and is not intended as a
-  production-ready tool. Trained on seven <strong>SURFRAD</strong> stations across
-  diverse North American climate regimes, using historical solar irradiance
-  records exclusively — derived features such as lags and ramp rates are the only
-  signals the model sees, with no auxiliary meteorological variables.
-  This deliberate minimalism isolates the contribution of the architecture itself
-  and demonstrates that realistic irradiance sequences can be synthesised from
-  solar measurements alone. 
-  The key philosophy of the model is that it uses the minimum to learn and needs the minimum to work.
+  This implementation is a research prototype trained exclusively on <strong>SURFRAD</strong>
+  ground measurements from seven stations spanning diverse North American climate regimes.
+  No auxiliary meteorological variables enter the model at any stage — only solar irradiance
+  records and their derived features. This deliberate minimalism isolates the
+  contribution of the architecture and demonstrates that physically realistic
+  sequences can be synthesised from solar measurements alone.
+  <em>The guiding principle: use the minimum to learn, need the minimum to work.</em>
   <br><br>
-  The model generalises well to held-out sites and years.
-  For sites whose climate falls outside that distribution —
-  remote archipelagos, tropical monsoon zones — generalisation is not guaranteed;
-  fine-tuning on a modest set of local ground measurements is recommended.
-  It is worth noting that conditioning the model on historical observations or richer 
-  inputs — such as sky imagery or free-text scene descriptions — would require only a 
-  lightweight addition to the existing architecture, naturally extending it into either 
-  a solar irradiance forecaster or a prompt-driven generator. Code, weights, and technical 
-  details are available in the accompanying GitHub repository and research paper.
+  The architecture combines a physics-conditioned VAE (Stage 1) with a Transformer
+  denoiser operating in latent τ-space (Stage 2). A <strong>site context embedding</strong>
+  encodes the location's Köppen climate class and irradiance quantiles — derived automatically
+  from coordinates — and biases the Transformer's self-attention to learn site-specific
+  day-to-day persistence patterns. This allows the model to generate sequences whose
+  regime transition dynamics adapt to the climatological character of any location,
+  not just the training stations.
+  <br><br>
+  The model generalises well to held-out years at stations within the training
+  distribution. Generalisation to climatologically distinct sites — tropical monsoon
+  zones, polar regions — is not guaranteed; the transition dynamics reflect the
+  North American training distribution. Fine-tuning on local ground measurements
+  is recommended for such sites.
+  <br><br>
+  The architecture is designed to be extensible. Conditioning on historical
+  observations, sky imagery, or richer inputs requires only a lightweight addition,
+  naturally extending the model into a forecaster or a prompt-driven generator.
+  Code, weights, and technical details are available in the accompanying GitHub
+  repository and research paper.
   </div>
 </div>
 """, unsafe_allow_html=True)
 
 with col_right:
-    # ── Map ──────────────────────────────────────────────────────────────────
+    # -- Map --
     st.markdown("<div class='sec-rule'>SURFRAD Network</div>", unsafe_allow_html=True)
     st.markdown("<div class='panel-flush'>", unsafe_allow_html=True)
     fig_map = make_station_map()
     st.pyplot(fig_map, use_container_width=True)
     plt.close(fig_map)
     st.markdown("</div>", unsafe_allow_html=True)
-    # ── Table ─────────────────────────────────────────────────────────────────
+    # -- Table --
     st.markdown("<div class='sec-rule' style='margin-top:1.2rem;'>Training Stations</div>", unsafe_allow_html=True)
     rows_html = "".join(
         f"<tr><td>{sid}</td><td>{m['name']}</td>"
@@ -1088,22 +1163,21 @@ with col_right:
 st.markdown("<hr class='hdiv'>", unsafe_allow_html=True)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 2 — GENERATION
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# SECTION 2 - GENERATION
+# ==============================================================================
 st.markdown('<a class="section-anchor" id="generation"></a>', unsafe_allow_html=True)
 st.markdown("<div class='section-title'>Generation</div>", unsafe_allow_html=True)
 
-#st.markdown("<div class='ctrl-card'>", unsafe_allow_html=True)
 st.markdown("<div class='ctrl-title'>Parameters</div>", unsafe_allow_html=True)
 st.caption("The model currently generates data at 10-min resolution. Higher resolution requires more training hardware and time")
 
 c_lat, c_lon = st.columns([1, 1], gap="medium")
 with c_lat:
-    lat = st.number_input("Latitude (°N)", value=40.05,
+    lat = st.number_input("Latitude (\u00b0N)", value=40.05,
                           min_value=-90.0, max_value=90.0, step=0.01, format="%.4f")
 with c_lon:
-    lon = st.number_input("Longitude (°E)", value=-88.37,
+    lon = st.number_input("Longitude (\u00b0E)", value=-88.37,
                           min_value=-180.0, max_value=180.0, step=0.01, format="%.4f")
 
 today = date.today()
@@ -1120,7 +1194,7 @@ with c_btn:
 
 st.markdown("</div>", unsafe_allow_html=True)
 
-# ── Input validation (runs on every render, before any generation) ────────────
+# -- Input validation (runs on every render, before any generation) --
 input_errors = validate_inputs(lat, lon, start_date, end_date)
 
 if input_errors:
@@ -1159,7 +1233,7 @@ if generate_btn:
         <line x1='16' y1='40' x2='9.5' y2='46.5' stroke='#e8b84b' stroke-width='2' stroke-linecap='round' opacity='0.2'/>
       </svg>
       <div class='loader-title'>Running SOLAD</div>
-<div class='loader-sub'>No GPU available — on CPU, generating one full year of data takes approximately 10 minutes</div>
+<div class='loader-sub'>Generating — on GPU ~2–3 min per year; on CPU approximately 8–10 min</div>
 <div class='loader-sub' style='margin-top:0.4rem;color:#e8b84b;letter-spacing:0.06em;'>
   {lat:.4f}&deg;&thinsp;N &nbsp;&middot;&nbsp; {lon:.4f}&deg;&thinsp;E &nbsp;&middot;&nbsp; {start_date} &rarr; {end_date} &nbsp;&middot;&nbsp; {n_days} days
 </div>
@@ -1177,7 +1251,7 @@ if generate_btn:
         stats     = compute_stats(gen, cs_ghi, dates, cfg)
     except Exception as e:
         loader_slot.empty()
-        st.error(f"Generation failed — {type(e).__name__}: {e}")
+        st.error(f"Generation failed - {type(e).__name__}: {e}")
         log.exception("Generation error")
         st.stop()
 
@@ -1255,9 +1329,9 @@ else:
 st.markdown("<hr class='hdiv'>", unsafe_allow_html=True)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — DATA REFERENCE
-# ═════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# SECTION 3 - DATA REFERENCE
+# ==============================================================================
 st.markdown('<a class="section-anchor" id="data"></a>', unsafe_allow_html=True)
 st.markdown("<div class='section-title'>SURFRAD Data Acquisition</div>", unsafe_allow_html=True)
 
@@ -1270,7 +1344,7 @@ with st.expander("What is SURFRAD?", expanded=False):
     irradiance (GHI)</strong>, direct normal irradiance (DNI), diffuse horizontal irradiance
     (DHI) and meteorological variables at
     <strong>1-minute resolution</strong>. Data are archived in flat <code>.dat</code> text
-    files — one file per station per day — freely accessible via NOAA's anonymous FTP server.
+    files - one file per station per day - freely accessible via NOAA's anonymous FTP server.
     The <code>pvlib</code> library provides <code>pvlib.iotools.read_surfrad</code> to parse
     these into a tidy <code>pandas.DataFrame</code>.
     </div>
@@ -1286,39 +1360,39 @@ with st.expander("Archive structure and station codes", expanded=False):
     """, unsafe_allow_html=True)
     st.code("""\
 ftp://aftp.cmdl.noaa.gov/data/radiation/surfrad/
-├── Bondville_IL/
-│   ├── 2022/
-│   │   ├── bon22001.dat   
-│   │   └── ...
-│   └── 2023/
-├── Desert_Rock_NV/
-├── Fort_Peck_MT/
-├── Goodwin_Creek_MS/
-├── Penn_State_PA/
-├── Sioux_Falls_SD/
-└── tbl/                  """, language="text")
++-- Bondville_IL/
+|   +-- 2022/
+|   |   +-- bon22001.dat   
+|   |   +-- ...
+|   +-- 2023/
++-- Desert_Rock_NV/
++-- Fort_Peck_MT/
++-- Goodwin_Creek_MS/
++-- Penn_State_PA/
++-- Sioux_Falls_SD/
++-- tbl/                  """, language="text")
 
 with st.expander("Step-by-step download procedure", expanded=False):
     steps = [
-        ("Step 1 — Install dependencies",
+        ("Step 1 - Install dependencies",
          "Install with <code>pip install pvlib pandas</code>. No separate FTP client is required."),
-        ("Step 2 — Understand the file reader",
+        ("Step 2 - Understand the file reader",
          "<code>pvlib.iotools.read_surfrad(url, map_variables=True)</code> accepts a local path or "
          "full FTP URL and returns a (<code>DataFrame</code>, <code>metadata dict</code>) tuple. "
          "The <code>map_variables=True</code> flag renames columns to standard pvlib names: "
          "<code>ghi</code>, <code>dni</code>, <code>dhi</code>"),
-        ("Step 3 — Construct the URL",
+        ("Step 3 - Construct the URL",
          "Pattern: <code>ftp://...surfrad/{station}/{year}/{code}{YY}{DOY:03d}.dat</code>. "
          "Example: Bondville, day 15 of 2022 &rarr; <code>bon22015.dat</code> inside <code>Bondville_IL/2022/</code>."),
-        ("Step 4 — Handle connection failures",
+        ("Step 4 - Handle connection failures",
          "Wrap each download in a retry loop (3 attempts, 1-second back-off). "
          "Catch <code>socket.timeout</code>, <code>urllib.error.URLError</code>, and "
          "generic <code>Exception</code> separately to avoid aborting an entire station-year."),
-        ("Step 5 — Respect the server",
+        ("Step 5 - Respect the server",
          "Insert a <strong>0.1-second delay between day files</strong> and a "
-         "<strong>2-second delay between years</strong>. Single-threaded only — no parallel downloads."),
-        ("Step 6 — Validate and persist",
-         "Apply physical bounds: GHI/DNI/DHI in [&minus;50, 2000] W m&minus;&sup2; ... "
+         "<strong>2-second delay between years</strong>. Single-threaded only - no parallel downloads."),
+        ("Step 6 - Validate and persist",
+         "Apply physical bounds: GHI/DNI/DHI in [-50, 2000] W m\u207b\u00b2 ... "
          "Save as <code>surfrad_data/{station}/{station}_{year}.csv</code>."),
     ]
     for title, body in steps:

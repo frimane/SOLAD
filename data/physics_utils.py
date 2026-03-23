@@ -1,19 +1,21 @@
+"""
+data/physics_utils.py
+---------------------
+Assembles physics conditioning tensors from profile dicts produced by
+SolarPreprocessor.
 
-# Assembles physics conditioning tensors from profile dicts produced by
-# SolarPreprocessor.
+ETR strategy (issues #1, #17)
+------------------------------
+ETR is a pure function of DOY — we compute it once per profile using a
+fast vectorised Spencer formula (no pvlib DatetimeIndex call in the hot
+path). The formula requires only integer DOY, so it runs in microseconds.
 
-# ETR strategy 
-# ------------------------------
-# ETR is a pure function of DOY — we compute it once per profile using a
-# fast vectorised Spencer formula (no pvlib DatetimeIndex call in the hot
-# path). The formula requires only integer DOY, so it runs in microseconds.
-
-# Day features 
-# -----------------------------
-# - Zenith threshold always comes from the caller, never hard-coded.
-# - sunrise_hour / sunset_hour expressed as hours-from-solar-noon (signed),
-#   not raw UTC hours.  This removes the latitude×timezone confound.
-
+Day features (issues #2, #7)
+-----------------------------
+- Zenith threshold always comes from the caller, never hard-coded.
+- sunrise_hour / sunset_hour expressed as hours-from-solar-noon (signed),
+  not raw UTC hours.  This removes the latitude×timezone confound.
+"""
 
 import json
 import logging
@@ -40,7 +42,6 @@ _DAY_FEAT_NAMES = [
     "sunrise_from_noon",   # hours before solar noon (negative = before)
     "sunset_from_noon",    # hours after solar noon (positive = after)
     "day_length_hours",
-    "toa_daily_irradiation",
 ]
 
 
@@ -131,7 +132,10 @@ def extract_day_features(
     3  sunrise_from_noon     hours from solar noon to sunrise (negative)
     4  sunset_from_noon      hours from solar noon to sunset (positive)
     5  day_length_hours      total sunlit duration
-    6  toa_daily_irradiation sum(ETR)×Δt [Wh/m²]
+
+    TOA daily irradiation removed — it is a deterministic function of DOY
+    and latitude, both already encoded via doy_sin/cos and sunrise/sunset.
+    Its log z-score std was 0.024 causing z-scores of ±20, dominating gradients.
 
     Sunrise/sunset are expressed relative to solar noon so the feature
     is independent of UTC timezone offset (fixes audit issue #7).
@@ -209,15 +213,10 @@ def extract_day_features(
     else:
         day_length_hours = max(0.0, ss_hour - sr_hour)
 
-    # ── TOA daily irradiation via fast Spencer formula ────────────────────────
-    T        = len(zenith_arr)
-    etr      = _etr_spencer(doy, T, dt_hours)
-    toa_daily = float(np.sum(etr) * dt_hours)
-
     result = np.array([
         declination, doy_sin, doy_cos,
         sunrise_from_noon, sunset_from_noon,
-        day_length_hours, toa_daily,
+        day_length_hours,
     ], dtype=np.float32)
 
     assert np.all(np.isfinite(result)), (
@@ -238,7 +237,121 @@ def extract_location_features(lat: float, lon: float) -> np.ndarray:
     ], dtype=np.float32)
 
 
-# ── 5. Normalisation stats ────────────────────────────────────────────────────
+# ── 4b. Climate features from kgcpy ──────────────────────────────────────────
+#
+# Enriches the denoiser's day-level conditioning with climatological context
+# that pvlib solar geometry alone cannot provide.  Computed entirely from
+# lat/lon via kgcpy — no historical observations needed — so available at
+# inference time for any arbitrary location.
+#
+# kgcpy (pip install kgcpy) provides:
+#   kgcpy.lookupCZ(lat, lon)          → Köppen zone string e.g. "Cfa", "BWh"
+#   kgcpy.irradianceQuantile(zone)    → (p98, p80, p50, p30) tuple [Wh/m²/year]
+#
+# Feature vector (10 dims):
+#   0-5   Köppen one-hot: tropical(A), arid(B), temperate(C),
+#                         continental(D), polar(E), other/unknown
+#   6-9   Irradiance quantiles (p30, p50, p80, p98) in Wh/m²/year
+#         — normalised by ClimateFeatNormStats at training time
+#
+# Appended to 7-dim solar day features → 17 dims total per day.
+# Config: diffusion.day_feat_dim must equal 7 + 10 = 17.
+#
+# INFERENCE CONTRACT: extract_climate_features(lat, lon) is called once per
+# location and broadcast to all days.  No training data, no observations needed.
+# Falls back to zeros gracefully if kgcpy is unavailable.
+
+_KOPPEN_MAIN_GROUPS = {
+    "A": 0,   # tropical
+    "B": 1,   # arid
+    "C": 2,   # temperate
+    "D": 3,   # continental
+    "E": 4,   # polar
+}
+_N_KOPPEN_CLASSES = 6    # 5 main + 1 unknown
+_N_IRR_QUANTILES  = 4    # p30, p50, p80, p98
+N_CLIMATE_FEATURES = _N_KOPPEN_CLASSES + _N_IRR_QUANTILES   # 10
+
+
+def _koppen_to_onehot(zone_str: str) -> np.ndarray:
+    """Map Köppen zone string (e.g. 'Cfb') to (_N_KOPPEN_CLASSES,) one-hot."""
+    vec = np.zeros(_N_KOPPEN_CLASSES, dtype=np.float32)
+    if zone_str and len(zone_str) >= 1:
+        idx = _KOPPEN_MAIN_GROUPS.get(zone_str[0].upper(), _N_KOPPEN_CLASSES - 1)
+    else:
+        idx = _N_KOPPEN_CLASSES - 1   # unknown
+    vec[idx] = 1.0
+    return vec
+
+
+def extract_climate_features(lat: float, lon: float) -> np.ndarray:
+    """Compute (N_CLIMATE_FEATURES=10,) climate vector from lat/lon alone.
+
+    Features
+    --------
+    0-5   Köppen one-hot (tropical, arid, temperate, continental, polar, other)
+    6-9   Irradiance quantiles (p30, p50, p80, p98) in Wh/m²/year
+          from kgcpy.irradianceQuantile — per-zone annual GHI statistics
+          fitted on real historical irradiance data globally.
+
+    Falls back to zeros with a warning if kgcpy is not installed.
+    The model trains correctly without climate features; the denoiser will
+    learn climate conditioning only when kgcpy is available.
+
+    Install: pip install kgcpy
+    """
+    koppen_vec = np.zeros(_N_KOPPEN_CLASSES, dtype=np.float32)
+    irr_q      = np.zeros(_N_IRR_QUANTILES,  dtype=np.float32)
+    zone_str   = "unknown"
+
+    try:
+        import kgcpy as _kgcpy
+
+        # Köppen zone lookup — returns string like "Cfa", "BWh", "Dfc"
+        zone_str   = str(_kgcpy.lookupCZ(lat, lon))
+        koppen_vec = _koppen_to_onehot(zone_str)
+
+        # Irradiance quantiles for this zone.
+        # irradianceQuantile returns (p98, p80, p50, p30) — reorder to ascending.
+        q_tuple = _kgcpy.irradianceQuantile(zone_str)
+        if isinstance(q_tuple, tuple) and len(q_tuple) == 4:
+            p98, p80, p50, p30 = (float(v) for v in q_tuple)
+            irr_q = np.array([p30, p50, p80, p98], dtype=np.float32)
+        else:
+            log.warning(
+                "kgcpy.irradianceQuantile returned unexpected value for zone %s: %s",
+                zone_str, q_tuple,
+            )
+
+    except ImportError:
+        log.warning(
+            "kgcpy not installed — climate features will be zeros. "
+            "Install with: pip install kgcpy  "
+            "Training will proceed without climate conditioning."
+        )
+    except Exception as e:
+        log.warning(
+            "kgcpy lookup failed for (lat=%.4f, lon=%.4f): %s — "
+            "climate features will be zeros.", lat, lon, e,
+        )
+
+    features = np.concatenate([koppen_vec, irr_q])   # (10,)
+    log.debug(
+        "Climate features (lat=%.2f lon=%.2f): zone=%s  "
+        "p30=%.0f p50=%.0f p80=%.0f p98=%.0f Wh/m²/yr",
+        lat, lon, zone_str,
+        float(irr_q[0]), float(irr_q[1]), float(irr_q[2]), float(irr_q[3]),
+    )
+    return features
+
+
+# Climate feature names for logging
+_CLIMATE_FEAT_NAMES = [
+    "koppen_tropical", "koppen_arid", "koppen_temperate",
+    "koppen_continental", "koppen_polar", "koppen_other",
+    "irr_p30", "irr_p50", "irr_p80", "irr_p98",
+]
+assert len(_CLIMATE_FEAT_NAMES) == N_CLIMATE_FEATURES
 
 @dataclass
 class _NormStats:
@@ -293,7 +406,81 @@ class DayFeatureNormStats(_NormStats):
     pass
 
 
-# ── 6b. Observation-channel matrix (encoder-only; not needed at generation) ───
+class ClimateFeatNormStats(_NormStats):
+    """Normalisation stats for the N_CLIMATE_FEATURES-dim climate feature vector.
+
+    Köppen one-hot dims (0 to _N_KOPPEN_CLASSES-1) are binary — passed through
+    unchanged as {0,1}.  Only the irradiance quantile dims are z-scored.
+    Mirrors the ObsPhysNormStats binary/continuous split pattern.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Set binary_mask as instance attribute (not class-level) to avoid
+        # shared-mutable-default issues across instances.
+        self.binary_mask: np.ndarray = np.array(
+            [True] * _N_KOPPEN_CLASSES + [False] * _N_IRR_QUANTILES, dtype=bool
+        )
+
+    def fit(self, arrays: List[np.ndarray]) -> None:
+        """Fit z-score stats on irradiance quantile dims only."""
+        if not arrays:
+            self.mean_   = np.zeros(_N_IRR_QUANTILES, dtype=np.float32)
+            self.std_    = np.ones(_N_IRR_QUANTILES,  dtype=np.float32)
+            self._fitted = True
+            return
+        # Each array is (1, N_CLIMATE_FEATURES) — slice irradiance dims
+        continuous = [a[..., _N_KOPPEN_CLASSES:] for a in arrays]
+        data = np.concatenate(continuous, axis=0).reshape(-1, _N_IRR_QUANTILES)
+        self.mean_ = data.mean(axis=0).astype(np.float32)
+        self.std_  = data.std(axis=0).astype(np.float32)
+        self.std_  = np.where(self.std_ < 1e-6, 1.0, self.std_).astype(np.float32)
+        self._fitted = True
+        log.info(
+            "ClimateFeatNormStats fitted | irr_q mean=%s | irr_q std=%s",
+            self.mean_.round(1), self.std_.round(1),
+        )
+
+    def normalize(self, arr: np.ndarray) -> np.ndarray:
+        """Z-score irradiance quantile dims; pass through Köppen one-hot unchanged.
+
+        After z-scoring, irradiance quantile dims are soft-clamped to [-3, +3].
+        This prevents out-of-distribution locations (e.g. desert or polar sites
+        not seen during training) from producing extreme feature values that the
+        denoiser has never encountered. 3-sigma covers 99.7% of the training
+        distribution — values beyond are gently clamped rather than extrapolating.
+        Köppen one-hot dims (0-5) are already {0,1} and need no clamping.
+        """
+        self._check()
+        out = arr.astype(np.float32).copy()
+        # Z-score irradiance quantile dims
+        out[..., _N_KOPPEN_CLASSES:] = (
+            (out[..., _N_KOPPEN_CLASSES:] - self.mean_) / self.std_
+        )
+        # Soft clamp irradiance dims to [-3, +3] — OOD protection
+        out[..., _N_KOPPEN_CLASSES:] = np.clip(
+            out[..., _N_KOPPEN_CLASSES:], -3.0, 3.0
+        )
+        return out
+
+    def save(self, path) -> None:
+        self._check()
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w") as f:
+            json.dump({"mean": self.mean_.tolist(), "std": self.std_.tolist()}, f, indent=2)
+        log.info("ClimateFeatNormStats saved → %s", path)
+
+    def load(self, path) -> None:
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"ClimateFeatNormStats not found: {path.resolve()}")
+        with path.open() as f:
+            blob = json.load(f)
+        self.mean_   = np.array(blob["mean"], dtype=np.float32)
+        self.std_    = np.array(blob["std"],  dtype=np.float32)
+        self._fitted = True
+        log.info("ClimateFeatNormStats loaded ← %s", path)
 
 # Maps profile dict key → human-readable name (used for logging only).
 # Top-level profile keys (measurements) + derived_features sub-dict keys
@@ -629,7 +816,7 @@ def fit_all_norm_stats_from_cfg(
     This is the recommended call site in main.py — all thresholds and channel
     names are read from config automatically.
 
-    Returns (intraday_stats, day_feat_stats, obs_stats).
+    Returns (intraday_stats, day_feat_stats, obs_stats, climate_stats).
     """
     return fit_all_norm_stats(
         profiles=profiles,
@@ -644,17 +831,17 @@ def fit_all_norm_stats(
     zenith_threshold: float,
     subsample: int = 1,
     obs_channel_names: Optional[List[str]] = None,
-) -> Tuple[IntraDayNormStats, DayFeatureNormStats, Optional["ObsPhysNormStats"]]:
+) -> Tuple["IntraDayNormStats", "DayFeatureNormStats", Optional["ObsPhysNormStats"], "ClimateFeatNormStats"]:
     """
     Fit all normalisation objects from a list of profile dicts.
 
     Returns
     -------
     intraday_stats : IntraDayNormStats   — for (zenith, ETR, GCS) sequences
-    day_feat_stats : DayFeatureNormStats — for 7-dim day-level features
+    day_feat_stats : DayFeatureNormStats — for 7-dim solar day-level features
     obs_stats      : ObsPhysNormStats | None
-                     Fitted when obs_channel_names is non-empty; otherwise None.
-                     obs_channel_names comes from cfg["vae"]["obs_channels"].
+    climate_stats  : ClimateFeatNormStats — for N_CLIMATE_FEATURES=10-dim climate features
+                     (Köppen one-hot + irradiance quantiles from kgcpy)
 
     Fitted on training profiles only — never val/test.
     """
@@ -665,15 +852,17 @@ def fit_all_norm_stats(
         "| obs_channels=%s …",
         len(profiles), subsample, obs_channel_names or "none",
     )
-    intraday_arrays: List[np.ndarray] = []
-    day_feat_arrays: List[np.ndarray] = []
-    obs_arrays:      List[np.ndarray] = []
+    intraday_arrays:  List[np.ndarray] = []
+    day_feat_arrays:  List[np.ndarray] = []
+    obs_arrays:       List[np.ndarray] = []
+    climate_arrays:   List[np.ndarray] = []
+
+    # Cache climate features per unique (lat, lon) to avoid redundant lookups.
+    # Each kgcpy lookup can take ~0.5s — caching saves minutes for large datasets.
+    _climate_cache: Dict[tuple, np.ndarray] = {}
 
     for profile in profiles[::subsample]:
         matrix = extract_intraday_matrix(profile)
-        # Fit IntraDayNormStats on SUNLIT timesteps only, matching the subset that
-        # dataset.__getitem__ applies normalisation to.  Including nighttime rows
-        # (zenith 90-180°, GCS=0) drags mean/std away from the model's actual input.
         zenith_col = np.array(
             profile["deterministic_geometry"][_ZENITH_COL], dtype=np.float32
         )
@@ -684,10 +873,17 @@ def fit_all_norm_stats(
 
         day_feat_arrays.append(extract_day_features(profile, zenith_threshold))
 
-        # Observation channels (sunlit only, same mask)
         if obs_channel_names:
             obs_mat = extract_obs_matrix(profile, obs_channel_names, zenith_threshold)
-            obs_arrays.append(obs_mat)   # (T_sun, N_obs)
+            obs_arrays.append(obs_mat)
+
+        # Climate features: compute once per unique (lat, lon) pair
+        lat = float(profile.get("lat", 0.0))
+        lon = float(profile.get("lon", 0.0))
+        key = (round(lat, 4), round(lon, 4))
+        if key not in _climate_cache:
+            _climate_cache[key] = extract_climate_features(lat, lon)
+        climate_arrays.append(_climate_cache[key].reshape(1, -1))
 
     intraday_stats = IntraDayNormStats()
     intraday_stats.fit(intraday_arrays)
@@ -695,35 +891,26 @@ def fit_all_norm_stats(
     day_feat_stats = DayFeatureNormStats()
     day_feat_stats.fit(day_feat_arrays)
 
+    # Climate stats — fit on irradiance quantile dims only (Köppen is binary)
+    climate_stats = ClimateFeatNormStats()
+    climate_stats.fit(climate_arrays)
+
     obs_stats: Optional[ObsPhysNormStats] = None
     if obs_channel_names and obs_arrays:
-        # Binary channels ({0,1} event flags) must NOT be z-scored.
-        # obs_binary_mask() returns True for each column that is binary.
-        # We fit ObsPhysNormStats ONLY on the non-binary columns.
-        # The binary columns pass through unchanged at normalisation time.
-        #
-        # ObsPhysNormStats.mean_ / std_ have shape (N_continuous,) — they
-        # correspond only to the non-binary columns in their original order.
-        # The binary_mask is stored on obs_stats so dataset.py can reconstruct
-        # the split without re-reading the config.
-        b_mask       = obs_binary_mask(obs_channel_names)   # (N_obs,) bool
+        b_mask       = obs_binary_mask(obs_channel_names)
         n_binary     = int(b_mask.sum())
         n_continuous = int((~b_mask).sum())
 
         obs_stats = ObsPhysNormStats()
 
         if n_continuous > 0:
-            # Slice out non-binary columns only for fitting
             continuous_arrays = [a[:, ~b_mask] for a in obs_arrays]
             obs_stats.fit(continuous_arrays)
         else:
-            # All channels are binary — dummy fitted stats with empty arrays
             obs_stats.mean_   = np.array([], dtype=np.float32)
             obs_stats.std_    = np.array([], dtype=np.float32)
             obs_stats._fitted = True
 
-        # Store binary mask + channel names on stats object so dataset.py
-        # can apply the correct per-column normalisation without re-reading cfg.
         obs_stats.binary_mask       = b_mask
         obs_stats.obs_channel_names = list(obs_channel_names)
 
@@ -736,4 +923,9 @@ def fit_all_norm_stats(
             binary_names = [n for n, b in zip(obs_channel_names, b_mask) if b]
             log.info("  Binary channels (NOT z-scored): %s", binary_names)
 
-    return intraday_stats, day_feat_stats, obs_stats
+    log.info(
+        "Climate features fitted | %d unique locations | %d Köppen classes + %d irr quantiles",
+        len(_climate_cache), _N_KOPPEN_CLASSES, _N_IRR_QUANTILES,
+    )
+
+    return intraday_stats, day_feat_stats, obs_stats, climate_stats

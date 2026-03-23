@@ -1,45 +1,47 @@
+"""
+solar_diffusion/optical_depth.py
+----------------------------------
+Optical-depth reparameterisation and noise schedule.
 
-# Optical-depth reparameterisation and noise schedule.
+Beer-Lambert: K*(t) = K_max · exp(−τ(t)), τ ≥ 0.
+Clear sky (K* = K_max) → τ = 0.  Total overcast (K* → 0) → τ → ∞.
+This maps the bounded K* domain onto the half-line where Gaussian noise is valid.
 
-# Beer-Lambert: K*(t) = K_max · exp(−τ(t)), τ ≥ 0.
-# Clear sky (K* = K_max) → τ = 0.  Total overcast (K* → 0) → τ → ∞.
-# This maps the bounded K* domain onto the half-line where Gaussian noise is valid.
+Stage 2 diffuses AE latent codes z ∈ R^{d_z} in τ-space:
+  1. z   = vae.encode(k_star, physics, mask)
+  2. τ_0 = LatentTauTransform.to_tau_space(z)       per-dim normalise → τ map
+  3. τ_k = √ᾱ_k·τ_0 + √(1−ᾱ_k)·ε                 forward diffusion
+  4. denoiser predicts v from τ_k
+  5. τ̂_0 = √ᾱ_k·τ_k − √(1−ᾱ_k)·v̂_k              inverse v-prediction
+  6. z̃   = LatentTauTransform.from_tau_space(τ̂_0)   invert τ → z
+  7. K̂*  = vae.decode(z̃, physics, target_len)
 
-# Stage 2 diffuses AE latent codes z ∈ R^{d_z} in τ-space:
-#   1. z   = vae.encode(k_star, physics, mask)
-#   2. τ_0 = LatentTauTransform.to_tau_space(z)       per-dim normalise → τ map
-#   3. τ_k = √ᾱ_k·τ_0 + √(1−ᾱ_k)·ε                 forward diffusion
-#   4. denoiser predicts v from τ_k
-#   5. τ̂_0 = √ᾱ_k·τ_k − √(1−ᾱ_k)·v̂_k              inverse v-prediction
-#   6. z̃   = LatentTauTransform.from_tau_space(τ̂_0)   invert τ → z
-#   7. K̂*  = vae.decode(z̃, physics, target_len)
+Noise schedule: cosine ᾱ (Nichol & Dhariwal 2021).
+As k→T: ᾱ_k → alpha_bar_min ≈ 0, so τ_k → ε (pure Gaussian noise).
+The τ reparameterisation is an inductive bias on latent geometry — clear days
+encode near τ≈0, overcast near large τ.
 
-# Noise schedule: cosine ᾱ (Nichol & Dhariwal 2021).
-# As k→T: ᾱ_k → alpha_bar_min ≈ 0, so τ_k → ε (pure Gaussian noise).
-# The τ reparameterisation is an inductive bias on latent geometry — clear days
-# encode near τ≈0, overcast near large τ.
+Affine standardisation:
+  Raw τ ∈ [0, τ_max] has std ≈ 0.48, which compresses signal relative to the
+  unit-Gaussian noise prior.  LatentTauTransform.fit() measures τ_mu and τ_sig
+  from the training set and standardises so the diffused distribution has
+  mean≈0 and std≈1.
 
-# Affine standardisation:
-#   Raw τ ∈ [0, τ_max] has std ≈ 0.48, which compresses signal relative to the
-#   unit-Gaussian noise prior.  LatentTauTransform.fit() measures τ_mu and τ_sig
-#   from the training set and standardises so the diffused distribution has
-#   mean≈0 and std≈1.
+  The clamp bounds used in p_sample / p_sample_ddim are kept SYMMETRIC around
+  zero in standardised space:
+      tau_min_std = −tau_max_std   where  tau_max_std = (τ_max_raw − τ_mu) / τ_sig
+  This prevents asymmetric clamping from biasing the reverse chain toward the
+  overcast end of τ-space (the core bug fixed here).  Values that fall below
+  −tau_max_std decode to physical τ < 0 and are harmlessly clamped to zero by
+  from_tau_space(), so the Beer-Lambert constraint is still enforced.
 
-#   The clamp bounds used in p_sample / p_sample_ddim are kept SYMMETRIC around
-#   zero in standardised space:
-#       tau_min_std = −tau_max_std   where  tau_max_std = (τ_max_raw − τ_mu) / τ_sig
-#   This prevents asymmetric clamping from biasing the reverse chain toward the
-#   overcast end of τ-space (the core bug fixed here).  Values that fall below
-#   −tau_max_std decode to physical τ < 0 and are harmlessly clamped to zero by
-#   from_tau_space(), so the Beer-Lambert constraint is still enforced.
+  Always call latent_transform.tau_clamp_bounds() and pass its result as
+  (tau_min, tau_max) to p_sample / p_sample_ddim.  Never use the raw defaults.
 
-#   Always call latent_transform.tau_clamp_bounds() and pass its result as
-#   (tau_min, tau_max) to p_sample / p_sample_ddim.  Never use the raw defaults.
-
-# v-prediction (Salimans & Ho 2022):
-#   v_k   = √ᾱ_k·ε − √(1−ᾱ_k)·τ_0
-#   τ̂_0  = √ᾱ_k·τ_k − √(1−ᾱ_k)·v̂_k
-
+v-prediction (Salimans & Ho 2022):
+  v_k   = √ᾱ_k·ε − √(1−ᾱ_k)·τ_0
+  τ̂_0  = √ᾱ_k·τ_k − √(1−ᾱ_k)·v̂_k
+"""
 
 import json
 import logging
@@ -127,6 +129,13 @@ class LatentTauTransform:
         # old checkpoints saved without these fields remain forward-compatible.
         self._tau_mu    = 0.0    # mean of raw τ over training set
         self._tau_sig   = 1.0    # std  of raw τ over training set  (≥ 0.01)
+        # Per-split affine stats for z_flat only (dims 0:d_z_flat).
+        # Stored separately so from_tau_space() can invert only z_flat without
+        # the z_var dims inflating tau_mu / deflating tau_sig.
+        # None = not stored (old checkpoint) → fall back to global stats.
+        self._tau_mu_flat  = None   # float or None
+        self._tau_sig_flat = None   # float or None
+        self._d_z_flat     = None   # int — how many dims are z_flat; None = unknown
         self._fitted    = False
 
     def fit(
@@ -137,8 +146,16 @@ class LatentTauTransform:
         percentile_hi: float = 99.0,
         std_margin_factor: float = 0.5,
         polarity_min_samples: int = 10,
+        d_z_flat: Optional[int] = None,   # cfg["vae"]["latent_dim"] — enables per-split affine stats
     ) -> None:
         """Fit per-dimension bounds from a (N, d_z) array of training latents.
+
+        d_z_flat : number of z_flat dimensions (cfg["vae"]["latent_dim"]).
+            When provided, separate affine standardisation stats are computed
+            for z_flat dims (0:d_z_flat) vs the full array. from_tau_space()
+            uses these when inverting only z_flat to avoid z_var's narrower
+            range corrupting the tau_mu / tau_sig estimates.
+            Pass cfg["vae"]["latent_dim"] here from train_diffusion().
 
         Uses percentile-based bounds (p1/p99 default) plus a margin of
         std_margin_factor × per-dim std, making the transform robust to
@@ -212,6 +229,39 @@ class LatentTauTransform:
         self._tau_mu  = float(_sample_means.mean())
         self._tau_sig = float(max(_tau_np.std(), 0.01))    # global std; clamped ≥ 0.01
 
+        # Per-split affine stats: compute separately for z_flat dims only.
+        # z_var dims (appended after z_flat) have a ~4× narrower value range,
+        # so they inflate _tau_mu and deflate _tau_sig for the z_flat dims.
+        # Storing separate stats means from_tau_space() uses the correct
+        # normalisation when inverting only z_flat (first d_z_flat dims).
+        # d_z_flat is passed via the optional keyword; if None we store None
+        # and fall back to global stats (backward compatible).
+        if d_z_flat is not None and 0 < d_z_flat < d_z:
+            self._d_z_flat    = int(d_z_flat)
+            _tau_flat         = _tau_np[:, :d_z_flat]      # (N, d_z_flat)
+            _flat_means       = _tau_flat.mean(axis=1)     # (N,)
+            self._tau_mu_flat  = float(_flat_means.mean())
+            self._tau_sig_flat = float(max(_tau_flat.std(), 0.01))
+            log.info(
+                "  Per-split affine stats (z_flat dims 0:%d): "
+                "tau_mu_flat=%.4f  tau_sig_flat=%.4f  "
+                "(global: tau_mu=%.4f  tau_sig=%.4f)",
+                d_z_flat,
+                self._tau_mu_flat, self._tau_sig_flat,
+                self._tau_mu, self._tau_sig,
+            )
+        else:
+            self._d_z_flat     = None
+            self._tau_mu_flat  = None
+            self._tau_sig_flat = None
+            if d_z_flat is not None:
+                log.warning(
+                    "fit(): d_z_flat=%s is out of range for d_z=%d — "
+                    "per-split affine stats not stored. Pass cfg['vae']['latent_dim'] "
+                    "as d_z_flat to enable z_flat-specific tau normalisation.",
+                    d_z_flat, d_z,
+                )
+
         self._fitted = True
         log.info(
             "LatentTauTransform fitted | d_z=%d | flip=%d/%d | "
@@ -229,16 +279,23 @@ class LatentTauTransform:
         self._check()
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "k_max":           float(self.k_max),
+            "z_norm_clamp_lo": float(self.z_norm_clamp_lo),
+            "z_min":           self._z_min.tolist(),
+            "z_max":           self._z_max.tolist(),
+            "flip_dims":       self._flip_dims.tolist(),
+            "tau_mu":          float(self._tau_mu),
+            "tau_sig":         float(self._tau_sig),
+            # Per-split stats for z_flat dims — None if not fitted with d_z_flat.
+            # from_tau_space() uses these when inverting only z_flat dims to avoid
+            # z_var's narrower range corrupting tau normalisation.
+            "d_z_flat":        self._d_z_flat,
+            "tau_mu_flat":     self._tau_mu_flat,
+            "tau_sig_flat":    self._tau_sig_flat,
+        }
         with path.open("w") as f:
-            json.dump({
-                "k_max":           float(self.k_max),
-                "z_norm_clamp_lo": float(self.z_norm_clamp_lo),
-                "z_min":           self._z_min.tolist(),
-                "z_max":           self._z_max.tolist(),
-                "flip_dims":       self._flip_dims.tolist(),
-                "tau_mu":          float(self._tau_mu),
-                "tau_sig":         float(self._tau_sig),
-            }, f, indent=2)
+            json.dump(payload, f, indent=2)
         log.info("LatentTauTransform saved → %s", path)
 
     def load(self, path: str | Path) -> None:
@@ -261,10 +318,23 @@ class LatentTauTransform:
         # Identity defaults (0, 1) keep old checkpoints forward-compatible.
         self._tau_mu  = float(blob.get("tau_mu",  0.0))
         self._tau_sig = float(blob.get("tau_sig", 1.0))
+        # Per-split stats — None if saved by an older version without d_z_flat.
+        self._d_z_flat     = blob.get("d_z_flat",     None)
+        self._tau_mu_flat  = blob.get("tau_mu_flat",  None)
+        self._tau_sig_flat = blob.get("tau_sig_flat", None)
+        if self._d_z_flat is not None:
+            self._d_z_flat = int(self._d_z_flat)
         self._fitted  = True
         log.info(
-            "LatentTauTransform loaded ← %s  (tau_mu=%.4f  tau_sig=%.4f)",
+            "LatentTauTransform loaded ← %s  (tau_mu=%.4f  tau_sig=%.4f  "
+            "tau_max_raw=%.4f  flip_dims=%d/%d  d_z_flat=%s  "
+            "tau_mu_flat=%s  tau_sig_flat=%s)",
             path, self._tau_mu, self._tau_sig,
+            float(-np.log(self.z_norm_clamp_lo)),
+            int(self._flip_dims.sum()), len(self._flip_dims),
+            self._d_z_flat,
+            f"{self._tau_mu_flat:.4f}"  if self._tau_mu_flat  is not None else "None",
+            f"{self._tau_sig_flat:.4f}" if self._tau_sig_flat is not None else "None",
         )
 
     def _check(self) -> None:
@@ -273,6 +343,70 @@ class LatentTauTransform:
                 "LatentTauTransform has not been fitted.  "
                 "Call fit() or load() before to_tau_space / from_tau_space."
             )
+
+    def validate_against(
+        self,
+        z_sample: np.ndarray,
+        tau_mean_tol: float = 0.5,
+        tau_std_tol: float  = 0.4,
+    ) -> bool:
+        """FIX C6: Check whether loaded affine stats match the current encoder output.
+
+        The affine stats (tau_mu, tau_sig) are fitted once on the training latent
+        cache and frozen. If z_std drifted during VAE training, the saved stats are
+        wrong for the current encoder — causing 2-3× tau_std miscalibration that
+        degrades the SNR at every diffusion step.
+
+        Args:
+            z_sample    : (N, d_z) float32 array of current-encoder latent codes.
+            tau_mean_tol: warn if |observed_tau_mean - fitted_tau_mu| > this.
+            tau_std_tol : warn if |observed_tau_std/fitted_tau_sig - 1| > this.
+
+        Returns True if stats match within tolerance, False if re-fitting is needed.
+        Called by train_diffusion() after loading the transform on resume.
+        """
+        self._check()
+        import torch as _torch
+        z_t   = _torch.from_numpy(z_sample.astype(np.float32))
+        tau_t = self.to_tau_space(z_t)  # uses existing affine stats
+        obs_mean = float(tau_t.mean().item())
+        obs_std  = float(tau_t.std().item())
+
+        mean_err = abs(obs_mean)               # should be ~0 after standardisation
+        std_err  = abs(obs_std - 1.0)          # should be ~1 after standardisation
+
+        ok = True
+        if mean_err > tau_mean_tol:
+            log.warning(
+                "[C6] LatentTauTransform.validate_against: "
+                "tau_mean=%.3f is far from 0 (tolerance=%.2f). "
+                "The affine stats (tau_mu=%.4f) were fitted on a different encoder "
+                "distribution. Re-fit by deleting the diffusion checkpoint and re-running "
+                "train_diffusion, or rebuild the latent cache manually.",
+                obs_mean, tau_mean_tol, self._tau_mu,
+            )
+            ok = False
+        if std_err > tau_std_tol:
+            log.warning(
+                "[C6] LatentTauTransform.validate_against: "
+                "tau_std=%.3f is far from 1.0 (tolerance=%.2f, err=%.2f×). "
+                "The affine scale (tau_sig=%.4f) is stale — z_std likely drifted "
+                "during VAE training (e.g. collapse from %.2f to %.2f). "
+                "This causes %.1f× SNR miscalibration at mid-noise steps. "
+                "ACTION: rebuild latent cache and re-fit tau transform.",
+                obs_std, tau_std_tol, std_err,
+                self._tau_sig,
+                self._tau_sig, self._tau_sig * obs_std,  # approx original vs current z_std
+                max(obs_std, 1.0 / max(obs_std, 1e-4)),  # amplification factor
+            )
+            ok = False
+        if ok:
+            log.info(
+                "[C6] LatentTauTransform.validate_against: stats match current encoder "
+                "(tau_mean=%.3f, tau_std=%.3f). No re-fitting needed.",
+                obs_mean, obs_std,
+            )
+        return ok
 
     def tau_clamp_bounds(self) -> Tuple[float, float]:
         """Return (tau_min_std, tau_max_std) for clamping τ̂₀ in p_sample / p_sample_ddim.
@@ -355,6 +489,14 @@ class LatentTauTransform:
               arrays _z_min / _z_max / _flip_dims are sliced to [:d_in]
               automatically so the caller does not need to know the exact split.
 
+        Affine stats selection:
+          If d_in == _d_z_flat and per-split stats (_tau_mu_flat, _tau_sig_flat)
+          are available, those are used instead of the global stats.  This is
+          critical because z_var dims (appended after z_flat) have a ~4× narrower
+          value range; their tau values inflate _tau_mu and deflate _tau_sig,
+          causing the global affine inversion to produce wrong z_flat values.
+          Per-split stats avoid this without requiring architectural changes.
+
         Inverse pipeline:
           1. Undo standardisation: τ_raw = τ_std × τ_sig + τ_mu
           2. Clamp τ_raw ≥ 0  (Beer-Lambert requires τ ≥ 0; v-prediction can
@@ -366,21 +508,39 @@ class LatentTauTransform:
         """
         self._check()
         dev  = tau.device
-        # FIX: z_var saturation — slice fitted arrays to match input dims.
-        # The transform was fitted on z_full (d_z_flat + z_var_dim, e.g. 116).
-        # generate.py and train.py now pass only the z_flat slice (e.g. 112)
-        # to avoid inverting z_var dims whose narrow real range causes extreme
-        # tau values that corrupt the denoiser's tau_proj at the next step.
-        # Without this slice the broadcast (z_norm/k_max * denom + z_min) would
-        # fail with a shape mismatch on the last dimension.
         d_in  = tau.shape[-1]
         z_min = torch.from_numpy(self._z_min[:d_in]).to(dev)
         z_max = torch.from_numpy(self._z_max[:d_in]).to(dev)
         flip  = torch.from_numpy(self._flip_dims[:d_in]).to(dev)
         denom = (z_max - z_min).clamp(min=1e-8)
 
+        # Select affine stats: use per-split (z_flat-only) when available and
+        # the input dimensionality matches d_z_flat exactly.
+        if (
+            self._d_z_flat is not None
+            and self._tau_mu_flat  is not None
+            and self._tau_sig_flat is not None
+            and d_in == self._d_z_flat
+        ):
+            tau_mu  = self._tau_mu_flat
+            tau_sig = self._tau_sig_flat
+            log.debug(
+                "from_tau_space: using z_flat-specific affine stats "
+                "(tau_mu_flat=%.4f  tau_sig_flat=%.4f  d_in=%d)",
+                tau_mu, tau_sig, d_in,
+            )
+        else:
+            tau_mu  = self._tau_mu
+            tau_sig = self._tau_sig
+            if self._d_z_flat is not None and d_in != self._d_z_flat:
+                log.debug(
+                    "from_tau_space: d_in=%d != d_z_flat=%d — using global "
+                    "affine stats (tau_mu=%.4f  tau_sig=%.4f).",
+                    d_in, self._d_z_flat, tau_mu, tau_sig,
+                )
+
         # Step 1–3: undo standardisation then invert log-map.
-        tau_raw = tau * self._tau_sig + self._tau_mu
+        tau_raw = tau * tau_sig + tau_mu
         # Step 2: clamp physical τ ≥ 0.  Values that overshoot the physical
         # floor (τ < 0) map to K* > k_max; clamping here is the correct place
         # because p_sample uses a symmetric clamp that intentionally allows

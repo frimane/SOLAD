@@ -1,25 +1,27 @@
+"""
+solar_diffusion/denoiser.py
+-----------------------------
+Stage 2: Transformer denoiser for the τ-space latent diffusion model.
 
-# Stage 2: Transformer denoiser for the τ-space latent diffusion model.
+Each of W day-tokens is formed by summing:
+  - Linear(d_z → d_model) projection of the noisy τ latent
+  - Learned positional embedding (W positions)
+  - Sinusoidal diffusion-step embedding (→ 2-layer MLP)
+  - PhysicsEmbedding: MLP([day_features + location]) → d_model
 
-# Each of W day-tokens is formed by summing:
-#   - Linear(d_z → d_model) projection of the noisy τ latent
-#   - Learned positional embedding (W positions)
-#   - Sinusoidal diffusion-step embedding (→ 2-layer MLP)
-#   - PhysicsEmbedding: MLP([day_features + location]) → d_model
+Transformer blocks (pre-norm, n_layers):
+  self-attention across W tokens → cross-attention to intraday physics → FFN
 
-# Transformer blocks (pre-norm, n_layers):
-#   self-attention across W tokens → cross-attention to intraday physics → FFN
+Regime conditioning:
+  4 real regime labels (0=clear, 1=mixed-clear, 2=mixed-overcast, 3=overcast)
+  plus 1 null token (index 4) used during CFG unconditional passes.
+  Projection is zero-initialised so it has no effect at initialisation.
+  n_regimes is read from cfg["diffusion"]["n_regimes"]; the null token index
+  is always n_regimes (one beyond the last real class).
 
-# Regime conditioning:
-#   4 real regime labels (0=clear, 1=mixed-clear, 2=mixed-overcast, 3=overcast)
-#   plus 1 null token (index 4) used during CFG unconditional passes.
-#   Projection is zero-initialised so it has no effect at initialisation.
-#   n_regimes is read from cfg["diffusion"]["n_regimes"]; the null token index
-#   is always n_regimes (one beyond the last real class).
-
-# Classifier-free guidance (CFG):
-#   v_guided = v_uncond + guidance_scale × (v_cond − v_uncond)
-
+Classifier-free guidance (CFG):
+  v_guided = v_uncond + guidance_scale × (v_cond − v_uncond)
+"""
 
 import math
 from typing import Dict, Optional, Tuple
@@ -160,9 +162,82 @@ class RegimeEmbedding(nn.Module):
         return self.proj(self.embed(ids))
 
 
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Intra-day physics projector (cross-attention key/value source)
+# Site context embedding — window-level persistence conditioning
 # ─────────────────────────────────────────────────────────────────────────────
+
+class SiteContextEmbedding(nn.Module):
+    """MLP(location + climate_features) → (B, 1, d_model) window-level bias.
+
+    Unlike PhysicsEmbedding which operates per-day, this module encodes the
+    site's climatological identity once per window and adds it as a constant
+    bias across all W day-tokens. This gives the Transformer's self-attention
+    a site-specific context that modulates how much inter-day correlation it
+    learns — arid sites (high irradiance quantiles) should show high clear-sky
+    persistence; marine temperate sites (low quantiles, Cfb) show lower
+    persistence. Without this, the model learns a pooled average ACF across
+    all training stations.
+
+    Input: [location (4) | climate_features (N_CLIMATE_FEATURES=10)] = 14 dims.
+    The climate slice is extracted from day_features[:, 0, solar_day_feat_dim:]
+    since climate features are constant across all days in a window.
+
+    Zero-initialised output projection so the module has no effect at init —
+    the denoiser learns to use site context gradually during training.
+
+    Config keys read:
+        diffusion.site_embed_dim      (default 64)
+        diffusion.solar_day_feat_dim  (default 7 — pure solar dims before climate)
+        diffusion.loc_feat_dim        (default 4)
+    """
+
+    def __init__(self, cfg: Dict):
+        super().__init__()
+        dc              = cfg["diffusion"]
+        d_model         = dc["d_model"]
+        embed_dim       = int(dc.get("site_embed_dim", 64))
+        loc_feat_dim    = int(dc["loc_feat_dim"])                  # 4
+        solar_day_dim   = int(dc.get("solar_day_feat_dim", 7))     # pure solar dims
+        day_feat_dim    = int(dc["day_feat_dim"])                  # 17 = 7 + 10
+        climate_dim     = day_feat_dim - solar_day_dim             # 10
+
+        # Input: location (4) + climate features (10) = 14
+        in_dim = loc_feat_dim + climate_dim
+
+        self.solar_day_dim = solar_day_dim  # used in forward to slice climate dims
+
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, d_model),
+        )
+        # Zero-init output so it has no effect at initialisation.
+        # The denoiser learns to use site context gradually.
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(
+        self,
+        location:     torch.Tensor,   # (B, loc_feat_dim=4)
+        day_features: torch.Tensor,   # (B, W, day_feat_dim=17)
+        drop_mask:    Optional[torch.Tensor] = None,   # (B,) bool — CFG drop
+    ) -> torch.Tensor:                # (B, 1, d_model)
+        # Climate features are constant across all W days — take from day 0.
+        clim = day_features[:, 0, self.solar_day_dim:]  # (B, climate_dim=10)
+        inp  = torch.cat([location, clim], dim=-1)      # (B, 14)
+        out  = self.mlp(inp).unsqueeze(1)               # (B, 1, d_model)
+
+        # CFG: zero out site context for dropped samples (unconditional pass).
+        # Site context is part of conditioning — must be masked with physics.
+        if drop_mask is not None and drop_mask.any():
+            dm  = drop_mask.view(-1, 1, 1).float()      # (B, 1, 1)
+            out = out * (1.0 - dm)
+
+        return out
 
 class IntraDayPhysicsProjector(nn.Module):
     """Project intraday physics (B, W, T_max, 3) → (B, W, T_max, d_model)."""
@@ -259,6 +334,13 @@ class SolarDenoiser(nn.Module):
     It has no knowledge of the d_z / z_var_dim split — that split is only
     relevant to the VAE decoder, which slices z_flat = z_full[:, :d_z] itself.
 
+    Site context embedding (SiteContextEmbedding):
+        A window-level bias derived from location + climate features, added
+        once to all W day-tokens before the Transformer blocks. This encodes
+        site-specific persistence structure (e.g. arid sites have higher
+        clear-sky ACF than marine temperate sites). Without this, the model
+        learns a pooled average ACF across all training stations.
+
     d_z_full is derived as:
         cfg["vae"]["latent_dim"] + cfg["vae"].get("z_var_dim", 0)
     Add vae.z_var_dim to config to enable the z_var variability latent.
@@ -268,8 +350,6 @@ class SolarDenoiser(nn.Module):
         super().__init__()
         dc       = cfg["diffusion"]
         vc       = cfg["vae"]
-        # d_z_full = z_flat dims + z_var dims.  z_var_dim defaults to 0 so this
-        # is backward-compatible with checkpoints trained without z_var.
         d_z_full = vc["latent_dim"] + int(vc.get("z_var_dim", 0))
         d_model  = dc["d_model"]
         n_heads  = dc["n_heads"]
@@ -278,25 +358,17 @@ class SolarDenoiser(nn.Module):
         ffn_dim  = d_model * dc["ffn_mult"]
         W        = cfg["data"]["window_size"]
 
-        self.d_z     = d_z_full   # kept as self.d_z for API compatibility
+        self.d_z     = d_z_full
         self.d_model = d_model
 
         self.tau_proj  = nn.Linear(d_z_full, d_model)
         self.step_emb  = DiffusionStepEmbedding(d_model)
-        # No step_proj: DiffusionStepEmbedding.proj already outputs d_model.
-        # A second Linear(d_model, d_model) on top is a redundant identity-init
-        # layer that adds parameters without semantic purpose.
         self.pos_emb   = nn.Embedding(W, d_model)
         self.register_buffer("pos_ids", torch.arange(W))
 
         self.phys_emb  = PhysicsEmbedding(cfg)
-        # phys_proj removed: PhysicsEmbedding now outputs d_model directly.
-        # The old Linear(d_z, d_model) was a redundant second projection on top
-        # of PhysicsEmbedding's own final Linear(hid, d_z).
 
         # Learned null embeddings for CFG unconditional passes.
-        # null_phys replaces the intraday cross-attn K/V stream.
-        # null_day_out replaces the day_features+location conditioning.
         self.null_phys    = nn.Parameter(torch.zeros(d_model))
         self.null_day_out = nn.Parameter(torch.zeros(d_model))
 
@@ -304,6 +376,12 @@ class SolarDenoiser(nn.Module):
 
         # 4-class regime embedding with null token at index n_regimes
         self.regime_emb = RegimeEmbedding(cfg)
+
+        # Site context embedding: window-level climate+location bias.
+        # Encodes site-specific persistence structure so the Transformer learns
+        # different ACF profiles for different climate zones rather than a
+        # pooled average. Zero-initialised — no effect at init.
+        self.site_emb = SiteContextEmbedding(cfg)
 
         self.blocks = nn.ModuleList([
             _TransformerBlock(d_model, n_heads, ffn_dim, dropout)
@@ -368,6 +446,12 @@ class SolarDenoiser(nn.Module):
         if regime_ids is not None:
             x = x + self.regime_emb(regime_ids, drop_mask)
 
+        # Site context: window-level climate+location bias broadcast to all W tokens.
+        # Encodes site-specific persistence structure for ACF learning.
+        # Zero-initialised — no effect at init, learned gradually.
+        # Masked to zero for CFG unconditional pass (drop_mask handled inside site_emb).
+        x = x + self.site_emb(location, day_features, drop_mask)  # (B, W, d_model)
+
         # Intra-day physics cross-attention keys/values
         cfg_drop_active = drop_mask is not None and drop_mask.any()
 
@@ -387,7 +471,14 @@ class SolarDenoiser(nn.Module):
                 intraday_kv = intraday_kv * keep + null_expanded * (1.0 - keep)
 
             phys_kv    = intraday_kv
+            # M5 NOTE: key_padding_mask correctly excludes nighttime timesteps.
+            # valid_mask is True for sunlit timesteps, False for night.
+            # key_pad_bw = ~valid_mask flips to the PyTorch convention:
+            # True in key_padding_mask = IGNORE that key position.
+            # This prevents nighttime padding from polluting day-level cross-attention.
             key_pad_bw = ~valid_mask.reshape(B * W, -1)
+            # Guard: if ALL timesteps are masked for a sample (polar night / data gap),
+            # un-mask the first position to prevent NaN from softmax over all-inf.
             all_masked = key_pad_bw.all(dim=1)
             if all_masked.any():
                 key_pad_bw = key_pad_bw.clone()
@@ -455,6 +546,7 @@ class SolarDenoiser(nn.Module):
                                 regime_ids=regime_ids)
         v_uncond = self.forward(tau_k, k, day_features, location,
                                 intraday_phys, valid_mask, drop_mask=all_drop,
+                                phys_kv_cache=phys_kv_cache, key_pad_cache=key_pad_cache,
                                 regime_ids=regime_ids)
         return v_uncond + guidance_scale * (v_cond - v_uncond)
 
