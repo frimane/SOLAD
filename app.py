@@ -1400,13 +1400,16 @@ st.markdown(
     f"<span style='color:#5a7a96;'>&copy; {_YEAR} Azeddine Frimane &nbsp;&middot;&nbsp; "
     f"<span style='color:#e8b84b;font-weight:600;'>SOLAD</span> "
     f"<span style='color:#5a7a96;'>{APP_VERSION}</span> &nbsp;&middot;&nbsp; "
-    f"Free and open-source software, licensed under "
-    f"<a href='https://www.gnu.org/licenses/gpl-3.0.html' style='color:#5b9bd5;text-decoration:none;'>GPL-3.0</a>"
+    f"<a href='https://github.com/frimane/SOLAD' style='text-decoration:none;'>"
+    f"<img src='https://img.shields.io/badge/GitHub-Code-181717?logo=github' style='vertical-align:middle;height:20px;'/>"
+    f"</a>"
+    f" &nbsp;"
+    f"<a href='https://www.gnu.org/licenses/gpl-3.0.html' style='text-decoration:none;'>"
+    f"<img src='https://img.shields.io/badge/License-GPLv3-blue.svg' style='vertical-align:middle;height:20px;'/>"
+    f"</a>"
     f" &nbsp;&middot;&nbsp; "
     f"Questions or feedback: "
     f"<a href='mailto:Azeddine.frimane@yahoo.com' style='color:#5b9bd5;text-decoration:none;'>Azeddine.frimane@yahoo.com</a>"
-    f" &nbsp;&middot;&nbsp; "
-    f"<a href='https://github.com/frimane/SOLAD' style='color:#5b9bd5;text-decoration:none;'>GitHub</a>"
     f"</span></div>",
     unsafe_allow_html=True,
 )
