@@ -12,10 +12,9 @@ import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd                   # top-level - no more deferred import inside build_csv
 import streamlit as st
+import streamlit.components.v1 as components
 import torch
 import yaml
-import streamlit.components.v1 as components
-
 
 # ==============================================================================
 # LOCAL / PROJECT IMPORTS  (kept deferred inside cached loaders to avoid
@@ -1099,7 +1098,7 @@ st.markdown(f"""
 <div class="nav-spacer"></div>
 """, unsafe_allow_html=True)
 
-st.markdown("""
+components.html("""
 <script>
 (function() {
   function setActive(id) {
@@ -1108,13 +1107,13 @@ st.markdown("""
       a.classList.toggle('active', a.dataset.section === id);
     });
   }
-  var sections = ['generation', 'about', 'data'];
+  var sections = ['generation', about', 'data']; 
   var observer = new window.parent.IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
       if (entry.isIntersecting) setActive(entry.target.id);
     });
   }, { rootMargin: '-56px 0px -60% 0px', threshold: 0 });
-  function observe() {
+  function observe() {active
     var found = 0;
     sections.forEach(function(id) {
       var el = window.parent.document.getElementById(id);
@@ -1125,7 +1124,7 @@ st.markdown("""
   observe();
 })();
 </script>
-""", unsafe_allow_html=True)
+""", height=0)
 
 
 # SECTION 2 - GENERATION
