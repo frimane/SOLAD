@@ -1285,7 +1285,7 @@ st.markdown("<hr class='hdiv'>", unsafe_allow_html=True)
 # SECTION 1 - ABOUT
 st.markdown('<a class="section-anchor" id="about"></a>', unsafe_allow_html=True)
 
-with st.expander("About", expanded=False):
+with st.expander("About", expanded=True):
     # -- Two-column About layout: left = text, right = map (top) + table (bottom) --
     col_text, col_right = st.columns([1.2, 1], gap="medium")
     with col_text:
