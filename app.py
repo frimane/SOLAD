@@ -185,7 +185,7 @@ section[data-testid="stMain"] > div { background: var(--bg0) !important; }
 .solad-nav {
     position: fixed;
     top: 0; left: 0; right: 0;
-    z-index: 9999;
+    z-index: 1000;
     background: var(--bg1);
     border-bottom: 1px solid var(--brd);
     display: flex;
@@ -602,6 +602,22 @@ html { scroll-behavior: smooth !important; }
     .callout, .note-box, .step-box {
         font-size: 0.72rem !important;
     }
+}
+
+/* Fix expander tap on mobile - ensure summary is always tappable */
+[data-testid="stExpander"] summary {
+    position: relative !important;
+    z-index: 10000 !important;
+    pointer-events: auto !important;
+    -webkit-tap-highlight-color: rgba(232,184,75,0.15) !important;
+    touch-action: manipulation !important;
+    cursor: pointer !important;
+    min-height: 44px !important;
+}
+
+[data-testid="stExpander"] {
+    position: relative !important;
+    z-index: 10000 !important;
 }
 
 @media (max-width: 480px) {
