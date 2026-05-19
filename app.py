@@ -1222,14 +1222,8 @@ with st.expander("About", expanded=False):
     col_text, col_right = st.columns([1.2, 1], gap="medium")
     with col_text:
         st.markdown("""
-<div style='
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    height: 100%;
-    padding-right: 0.5rem;
-'>
   <div <br><br> 
+  </div> <div <br><br> 
   </div>
   <div class='prose' style='font-size:0.88rem;line-height:1.85;font-family:Courier New,Courier,monospace;text-align:justify;'>
   SOLAD Generates 10-mmin realistic synthetic solar irradiance time series at arbitrary locations
@@ -1323,14 +1317,18 @@ with st.expander("Step 4 — Run the app", expanded=False):
                 unsafe_allow_html=True)
     st.code("streamlit run app.py", language="bash")
  
+_YEAR = 2026
+
 st.markdown(
     f"<div class='footer'>"
-    f"For any questions or feedback, contact me at"
-    f"&nbsp;<a href='mailto:Azeddine.frimane@yahoo.com' "
-    f"style='color:#5b9bd5;text-decoration:none;'>Azeddine.frimane@yahoo.com</a>"
-    f"&nbsp;&middot;&nbsp;"
-    f"<span style='color:#e8b84b;font-weight:600;'>SOLAD</span>"
-    f"<span style='color:#5a7a96;'>{APP_VERSION}</span>"
-    f"</div>",
+    f"<span style='color:#5a7a96;'>&copy; {_YEAR} Azeddine Frimane &nbsp;&middot;&nbsp; "
+    f"<span style='color:#e8b84b;font-weight:600;'>SOLAD</span> "
+    f"<span style='color:#5a7a96;'>{APP_VERSION}</span> &nbsp;&middot;&nbsp; "
+    f"Free and open-source software, licensed under "
+    f"<a href='https://www.gnu.org/licenses/gpl-3.0.html' style='color:#5b9bd5;text-decoration:none;'>GPL-3.0</a>"
+    f" &nbsp;&middot;&nbsp; "
+    f"Questions or feedback: "
+    f"<a href='mailto:Azeddine.frimane@yahoo.com' style='color:#5b9bd5;text-decoration:none;'>Azeddine.frimane@yahoo.com</a>"
+    f"</span></div>",
     unsafe_allow_html=True,
 )
