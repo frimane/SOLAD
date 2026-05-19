@@ -1,46 +1,46 @@
-"""
-solar_diffusion/generate.py
-----------------------------
-Arbitrary-length K* sequence generation.
+# 
+# solar_diffusion/generate.py
+# ----------------------------
+# Arbitrary-length K* sequence generation.
 
-Pipeline
---------
-1. Compute deterministic solar geometry for every requested day (pvlib).
-2. If N <= W: single DDPM reverse pass.
-3. If N > W:  autoregressive sliding window with (W - S) days of context overlap.
-4. Convert generated tau latents -> z using LatentTauTransform.from_tau_space().
-5. Decode each latent z -> sunlit K* profile via the AE decoder.
-6. Post-process: clip to [0, k_max], insert night zeros, smooth sunrise/sunset ramps.
+# Pipeline
+# --------
+# 1. Compute deterministic solar geometry for every requested day (pvlib).
+# 2. If N <= W: single DDPM reverse pass.
+# 3. If N > W:  autoregressive sliding window with (W - S) days of context overlap.
+# 4. Convert generated tau latents -> z using LatentTauTransform.from_tau_space().
+# 5. Decode each latent z -> sunlit K* profile via the AE decoder.
+# 6. Post-process: clip to [0, k_max], insert night zeros, smooth sunrise/sunset ramps.
 
-Regime conditioning — self-consistent feedback loop
-----------------------------------------------------
-The RegimeEmbedding inside SolarDenoiser was trained with real GMM-derived regime
-labels.  At generation time we have no ground-truth labels, so we infer them
-directly from the model's own predictions using a feedback loop:
+# Regime conditioning — self-consistent feedback loop
+# ----------------------------------------------------
+# The RegimeEmbedding inside SolarDenoiser was trained with real GMM-derived regime
+# labels.  At generation time we have no ground-truth labels, so we infer them
+# directly from the model's own predictions using a feedback loop:
 
-  At each denoising step k:
-    1. Run a cheap forward pass to predict τ̂₀ from the current noisy τₖ.
-    2. Map τ̂₀ → per-day τ means (mean over d_z).
-    3. Convert τ means to soft regime probabilities via the GMM τ-space boundaries
-       (clear ↔ low τ, overcast ↔ high τ) fitted from the training latent cache.
-    4. Take argmax → hard regime labels (1, W) int64.
-    5. Feed those labels back as `regime_ids` to the full CFG forward pass.
+#   At each denoising step k:
+#     1. Run a cheap forward pass to predict τ̂₀ from the current noisy τₖ.
+#     2. Map τ̂₀ → per-day τ means (mean over d_z).
+#     3. Convert τ means to soft regime probabilities via the GMM τ-space boundaries
+#        (clear ↔ low τ, overcast ↔ high τ) fitted from the training latent cache.
+#     4. Take argmax → hard regime labels (1, W) int64.
+#     5. Feed those labels back as `regime_ids` to the full CFG forward pass.
 
-This is self-consistent: the regime signal the denoiser receives at each step
-reflects where the trajectory is actually heading, not a hardcoded prior.
-Generalisation comes from the physics conditioning (location, DOY, ETR) — the
-denoiser learned that a desert site in summer naturally stays clear, a coastal
-site in winter stays mixed/overcast.  The regime labels track what the model is
-generating and reinforce it, rather than imposing it.
+# This is self-consistent: the regime signal the denoiser receives at each step
+# reflects where the trajectory is actually heading, not a hardcoded prior.
+# Generalisation comes from the physics conditioning (location, DOY, ETR) — the
+# denoiser learned that a desert site in summer naturally stays clear, a coastal
+# site in winter stays mixed/overcast.  The regime labels track what the model is
+# generating and reinforce it, rather than imposing it.
 
-The GMM τ-space boundaries are fitted once from the training latent cache during
-Stage 2 (stored in latent_tau_stats.json).  If they are unavailable the loop
-falls back to null regime tokens (original behaviour, no conditioning).
+# The GMM τ-space boundaries are fitted once from the training latent cache during
+# Stage 2 (stored in latent_tau_stats.json).  If they are unavailable the loop
+# falls back to null regime tokens (original behaviour, no conditioning).
 
-No meteorological observations are used at inference.
-User input: start_date, end_date, lat, lon.
-Everything else is computed from pvlib and the trained model weights.
-"""
+# No meteorological observations are used at inference.
+# User input: start_date, end_date, lat, lon.
+# Everything else is computed from pvlib and the trained model weights.
+# 
 
 import logging
 from datetime import date, timedelta
@@ -58,28 +58,28 @@ from solar_diffusion.vae import SolarVAE
 log = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # Self-consistent 4-class regime inference from τ̂₀ predictions
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 def _load_tau_class_centroids(
     latent_transform: "LatentTauTransform",
     cfg: Dict,
 ) -> Optional[np.ndarray]:
-    """Load per-class τ centroids written by fit_latent_tau_transform().
+    # Load per-class τ centroids written by fit_latent_tau_transform().
 
-    Returns a (n_regimes,) float32 array of per-class τ means (one scalar per
-    class, representing the mean τ averaged over all d_z dimensions), sorted in
-    ascending order (clear=0 has smallest τ, overcast=n-1 has largest τ).
+    # Returns a (n_regimes,) float32 array of per-class τ means (one scalar per
+    # class, representing the mean τ averaged over all d_z dimensions), sorted in
+    # ascending order (clear=0 has smallest τ, overcast=n-1 has largest τ).
 
-    Returns None if the centroids were not found in latent_tau_stats.json —
-    the caller falls back to null regime tokens in that case.
+    # Returns None if the centroids were not found in latent_tau_stats.json —
+    # the caller falls back to null regime tokens in that case.
 
-    The centroids live in the same τ-space that the denoiser operates in
-    (after per-dim normalisation + log map by LatentTauTransform), so they
-    are geometrically correct — unlike the old K*-to-τ heuristic which
-    ignored per-dimension z_min/z_max scaling entirely (NEW-5).
-    """
+    # The centroids live in the same τ-space that the denoiser operates in
+    # (after per-dim normalisation + log map by LatentTauTransform), so they
+    # are geometrically correct — unlike the old K*-to-τ heuristic which
+    # ignored per-dimension z_min/z_max scaling entirely (NEW-5).
+    # 
     tau_stats_path = cfg.get("paths", {}).get("latent_tau_stats", None)
     if tau_stats_path is None or not Path(tau_stats_path).exists():
         log.warning(
@@ -119,32 +119,32 @@ def _infer_regime_ids_from_tau(
     prior_strength:    float = 0.30,           # blend weight for location prior
     temperature:       float = 0.5,            # softmax temperature — read from config
 ) -> torch.Tensor:                             # (1, W) int64 regime labels
-    """Map τ̂₀ predictions to 4-class regime labels via nearest centroid.
+    # Map τ̂₀ predictions to 4-class regime labels via nearest centroid.
 
-    Per-day τ mean (mean over d_z) is compared against the n_regimes scalar
-    centroids fitted from the training latent cache.  The nearest centroid
-    (in L1) determines the regime label.
+    # Per-day τ mean (mean over d_z) is compared against the n_regimes scalar
+    # centroids fitted from the training latent cache.  The nearest centroid
+    # (in L1) determines the regime label.
 
-    This is geometrically correct: centroids live in the same τ-space the
-    denoiser operates in (per-dim normalised + log-mapped), so the comparison
-    is on the right scale regardless of per-dimension z_min/z_max (fixes NEW-5).
+    # This is geometrically correct: centroids live in the same τ-space the
+    # denoiser operates in (per-dim normalised + log-mapped), so the comparison
+    # is on the right scale regardless of per-dimension z_min/z_max (fixes NEW-5).
 
-    The 4-class assignment (0=clear … 3=overcast) matches the RegimeEmbedding
-    vocab, so the denoiser always receives a valid label, including class 3.
+    # The 4-class assignment (0=clear … 3=overcast) matches the RegimeEmbedding
+    # vocab, so the denoiser always receives a valid label, including class 3.
 
-    Parameters
-    ----------
-    tau_hat0       : (1, W, d_z) — denoiser's τ̂₀ prediction at step k
-    class_centroids: (n_regimes,) — ascending-τ scalar centroids from training
-    temperature    : softmax temperature for centroid distance → probability.
-                     Read from cfg["inference"]["regime_feedback_temperature"].
-                     Lower = sharper (nearer to argmax); higher = more uniform.
-                     0.5 is a reasonable default; tune if overcast is never sampled.
+    # Parameters
+    # ----------
+    # tau_hat0       : (1, W, d_z) — denoiser's τ̂₀ prediction at step k
+    # class_centroids: (n_regimes,) — ascending-τ scalar centroids from training
+    # temperature    : softmax temperature for centroid distance → probability.
+    #                  Read from cfg["inference"]["regime_feedback_temperature"].
+    #                  Lower = sharper (nearer to argmax); higher = more uniform.
+    #                  0.5 is a reasonable default; tune if overcast is never sampled.
 
-    Returns
-    -------
-    (1, W) int64 tensor on the same device as tau_hat0.
-    """
+    # Returns
+    # -------
+    # (1, W) int64 tensor on the same device as tau_hat0.
+    # 
     tau_mean = tau_hat0.mean(dim=2)                  # (1, W) — mean over d_z per day
 
     # Soft regime assignment via nearest-centroid distance → softmax probability.
@@ -175,15 +175,15 @@ def _infer_regime_ids_from_tau(
 
 
 def _utc_offset_from_profile(profile: Dict) -> Optional[float]:
-    """Read the exact UTC offset (fractional hours) from a real profile's timestamps.
+    # Read the exact UTC offset (fractional hours) from a real profile's timestamps.
 
-    SolarPreprocessor anchors timestamps[0] at local midnight expressed in UTC,
-    so the offset is simply the fractional hours between UTC midnight and the
-    first timestamp.  Supports sub-hour offsets (e.g. India +5:30, Nepal +5:45).
+    # SolarPreprocessor anchors timestamps[0] at local midnight expressed in UTC,
+    # so the offset is simply the fractional hours between UTC midnight and the
+    # first timestamp.  Supports sub-hour offsets (e.g. India +5:30, Nepal +5:45).
 
-    Returns None if timestamps are missing or unparseable — caller falls back
-    to the rounded longitude estimate.
-    """
+    # Returns None if timestamps are missing or unparseable — caller falls back
+    # to the rounded longitude estimate.
+    # 
     try:
         import pandas as _pd
         ts0 = _pd.Timestamp(profile["timestamps"][0])   # tz-naive UTC wall-clock
@@ -206,25 +206,25 @@ def _compute_solar_geometry(
     cfg: Dict,
     utc_offset_hours: Optional[float] = None,   # exact offset from real profile
 ) -> Tuple[List[Dict], np.ndarray, np.ndarray, int]:
-    """Compute all physics conditioning tensors for a list of dates.
+    # Compute all physics conditioning tensors for a list of dates.
 
-    All inputs come from pvlib + lat/lon — no observations needed.
+    # All inputs come from pvlib + lat/lon — no observations needed.
 
-    Timestamps are built in UTC anchored at local midnight.  When
-    ``utc_offset_hours`` is provided (read from a real profile's timestamps[0]
-    by ``_utc_offset_from_profile``), it is used directly so the generated
-    sunlit window aligns exactly with the preprocessed real profiles.  Without
-    it, the offset is estimated from longitude (1 h per 15°, rounded), which
-    can introduce a systematic 1–2 timestep shift for stations that don't sit
-    on a round-hour timezone meridian.
+    # Timestamps are built in UTC anchored at local midnight.  When
+    # ``utc_offset_hours`` is provided (read from a real profile's timestamps[0]
+    # by ``_utc_offset_from_profile``), it is used directly so the generated
+    # sunlit window aligns exactly with the preprocessed real profiles.  Without
+    # it, the offset is estimated from longitude (1 h per 15°, rounded), which
+    # can introduce a systematic 1–2 timestep shift for stations that don't sit
+    # on a round-hour timezone meridian.
 
-    Returns
-    -------
-    profiles        : list of synthetic profile dicts (same format as dataset)
-    day_feat_arr    : (N, 7) normalised day-level features
-    location_enc    : (4,) sin/cos lat/lon encoding
-    n_steps_per_day : int — inferred from inference_steps_per_day in cfg
-    """
+    # Returns
+    # -------
+    # profiles        : list of synthetic profile dicts (same format as dataset)
+    # day_feat_arr    : (N, 7) normalised day-level features
+    # location_enc    : (4,) sin/cos lat/lon encoding
+    # n_steps_per_day : int — inferred from inference_steps_per_day in cfg
+    # 
     import pandas as pd
     import pvlib
     from data.physics_utils import (
@@ -323,14 +323,14 @@ def _build_intraday_tensor(
     intraday_stats,
     device: torch.device,
 ) -> Tuple[torch.Tensor, torch.Tensor, List[np.ndarray]]:
-    """Build padded intraday_phys tensor and valid_mask for a window of profiles.
+    # Build padded intraday_phys tensor and valid_mask for a window of profiles.
 
-    Returns
-    -------
-    intraday  : (W, T_max, 3) float32 on device — normalised [zenith, ETR, GCS]
-    valid_mask: (W, T_max) bool on device — True = real (sunlit) timestep
-    sunlit_idx: list of W arrays with sunlit timestep indices into the full day
-    """
+    # Returns
+    # -------
+    # intraday  : (W, T_max, 3) float32 on device — normalised [zenith, ETR, GCS]
+    # valid_mask: (W, T_max) bool on device — True = real (sunlit) timestep
+    # sunlit_idx: list of W arrays with sunlit timestep indices into the full day
+    # 
     from data.physics_utils import extract_intraday_matrix, extract_sunlit_mask
 
     W          = len(profiles)
@@ -361,9 +361,9 @@ def _build_intraday_tensor(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # Core reverse sampler — DDIM (fast, default) or DDPM (stochastic)
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 @torch.no_grad()
 def _ddpm_reverse(
@@ -387,36 +387,36 @@ def _ddpm_reverse(
     feedback_temperature: float = 0.5,                    # softmax temperature for centroid→label; read from cfg
     tau_max:    float = 4.605,         # −log(z_norm_clamp_lo); physical upper bound on τ̂₀
 ) -> torch.Tensor:                 # (1, W, d_z) in τ-space
-    """Reverse diffusion producing τ latents for a window of W days.
+    # Reverse diffusion producing τ latents for a window of W days.
 
-    Sampler selection
-    -----------------
-    ddim_steps=None  : full DDPM (schedule.T steps, stochastic).
-    ddim_steps=N     : DDIM with N evenly-spaced steps (default 50).
-                       eta=0 → deterministic; eta=1 → DDPM-like noise.
+    # Sampler selection
+    # -----------------
+    # ddim_steps=None  : full DDPM (schedule.T steps, stochastic).
+    # ddim_steps=N     : DDIM with N evenly-spaced steps (default 50).
+    #                    eta=0 → deterministic; eta=1 → DDPM-like noise.
 
-    Context pinning (autoregressive generation / RePaint)
-    -----------------------------------------------------
-    The first n_ctx positions are hard-pinned at every denoising step:
-        τ[:, :n_ctx, :] = √ᾱ_k · context_tau + √(1−ᾱ_k) · fresh_noise
+    # Context pinning (autoregressive generation / RePaint)
+    # -----------------------------------------------------
+    # The first n_ctx positions are hard-pinned at every denoising step:
+    #     τ[:, :n_ctx, :] = √ᾱ_k · context_tau + √(1−ᾱ_k) · fresh_noise
 
-    Self-consistent 4-class regime feedback loop
-    --------------------------------------------
-    If tau_class_centroids (n_regimes,) is provided, regime labels are updated
-    at every denoising step via nearest-centroid assignment in τ-space:
+    # Self-consistent 4-class regime feedback loop
+    # --------------------------------------------
+    # If tau_class_centroids (n_regimes,) is provided, regime labels are updated
+    # at every denoising step via nearest-centroid assignment in τ-space:
 
-      1. Run a single forward pass (without CFG) to get τ̂₀ estimate.
-      2. Compute per-day τ mean (mean over d_z dimensions).
-      3. Assign the nearest of the n_regimes scalar centroids → hard label.
-      4. Pass those labels as regime_ids to the full CFG forward pass.
+    #   1. Run a single forward pass (without CFG) to get τ̂₀ estimate.
+    #   2. Compute per-day τ mean (mean over d_z dimensions).
+    #   3. Assign the nearest of the n_regimes scalar centroids → hard label.
+    #   4. Pass those labels as regime_ids to the full CFG forward pass.
 
-    Centroids come from class_tau_centroids in latent_tau_stats.json, fitted
-    from the training latent cache — geometrically correct in τ-space (fixes
-    the K*-to-τ heuristic that ignored per-dim z_min/z_max scaling).
+    # Centroids come from class_tau_centroids in latent_tau_stats.json, fitted
+    # from the training latent cache — geometrically correct in τ-space (fixes
+    # the K*-to-τ heuristic that ignored per-dim z_min/z_max scaling).
 
-    Returns τ-space latents. Caller applies LatentTauTransform.from_tau_space()
-    then vae.decode().
-    """
+    # Returns τ-space latents. Caller applies LatentTauTransform.from_tau_space()
+    # then vae.decode().
+    # 
     device = day_feat.device
     W      = day_feat.shape[1]
 
@@ -495,9 +495,9 @@ def _ddpm_reverse(
     return tau   # (1, W, d_z)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # Post-processing
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 def _postprocess_day(
     k_sun: np.ndarray,       # (T_sun,) reconstructed sunlit K*
@@ -507,14 +507,14 @@ def _postprocess_day(
     smooth_sigma: float,     # from cfg["inference"]["smooth_sigma"]
     boundary_width: int,     # from cfg["inference"]["boundary_width"]
 ) -> np.ndarray:             # (T_full,) full-day K* profile
-    """Build full-day K* profile from sunlit reconstruction.
+    # Build full-day K* profile from sunlit reconstruction.
 
-    Steps:
-      1. Clip to [0, k_max]         — physical bound
-      2. Insert into full-day array — night positions remain 0
-      3. Gaussian smooth sunrise/sunset boundaries only — removes hard edges
-      4. Hard-enforce night = 0.0   — physical constraint overrides smoothing
-    """
+    # Steps:
+    #   1. Clip to [0, k_max]         — physical bound
+    #   2. Insert into full-day array — night positions remain 0
+    #   3. Gaussian smooth sunrise/sunset boundaries only — removes hard edges
+    #   4. Hard-enforce night = 0.0   — physical constraint overrides smoothing
+    # 
     profile = np.zeros(T_full, dtype=np.float32)
 
     k_sun           = np.clip(k_sun, 0.0, k_max)
@@ -543,13 +543,10 @@ def _postprocess_day(
 
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # Main generator
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
 # CSV output helper
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 def _save_timeseries_csv(
     path: str,
@@ -559,17 +556,17 @@ def _save_timeseries_csv(
     clearsky_ghi: Optional[np.ndarray] = None,  # (N, T) W/m2 -- pvlib, same grid
     zenith: Optional[np.ndarray] = None,        # (N, T) degrees -- pvlib, same grid
 ) -> None:
-    """Save timeseries to a CSV with one row per timestep.
+    # Save timeseries to a CSV with one row per timestep.
 
-    Columns: ``date, timestep, generated[, real][, clearsky_ghi, zenith]``
+    # Columns: ``date, timestep, generated[, real][, clearsky_ghi, zenith]``
 
-    ``clearsky_ghi`` and ``zenith`` are derived from the same pvlib timestamp
-    grid used during generation, so they are guaranteed aligned with
-    ``generated`` index-for-index.
+    # ``clearsky_ghi`` and ``zenith`` are derived from the same pvlib timestamp
+    # grid used during generation, so they are guaranteed aligned with
+    # ``generated`` index-for-index.
 
-    ``real`` column is omitted when not provided (standalone generation).
-    Gap days in ``real`` (all-zero rows) are written as-is.
-    """
+    # ``real`` column is omitted when not provided (standalone generation).
+    # Gap days in ``real`` (all-zero rows) are written as-is.
+    # 
     import pandas as pd
     from pathlib import Path as _Path
 
@@ -607,45 +604,45 @@ def generate_sequence(
     device: torch.device,
     utc_offset_hours: Optional[float] = None,  # exact UTC offset from real profile
 ) -> np.ndarray:
-    """Generate a K* profile sequence for an arbitrary date range.
+    # Generate a K* profile sequence for an arbitrary date range.
 
-    The only inputs required from the user are start_date, end_date, lat, lon.
-    All conditioning tensors are computed deterministically from pvlib.
+    # The only inputs required from the user are start_date, end_date, lat, lon.
+    # All conditioning tensors are computed deterministically from pvlib.
 
-    Parameters
-    ----------
-    start_date / end_date : 'YYYY-MM-DD' strings (inclusive)
-    lat, lon              : location in decimal degrees
-    vae                   : trained AE (eval mode, frozen)
-    denoiser              : trained diffusion model (eval mode)
-    schedule              : TauNoiseSchedule (fitted at training time)
-    latent_transform      : fitted LatentTauTransform (tau <-> z mapping)
-    cfg                   : full config dict
-    intraday_stats        : fitted IntraDayNormStats
-    day_feat_stats        : fitted DayFeatureNormStats
-    device                : torch device
-    utc_offset_hours      : exact UTC offset (fractional hours) read from the
-                            first real profile's timestamps[0] by
-                            ``_utc_offset_from_profile``.  When provided, pvlib
-                            timestamps are anchored at exactly the same UTC point
-                            as the real profiles, eliminating the timestep shift.
-                            Falls back to round(lon/15) when None.
+    # Parameters
+    # ----------
+    # start_date / end_date : 'YYYY-MM-DD' strings (inclusive)
+    # lat, lon              : location in decimal degrees
+    # vae                   : trained AE (eval mode, frozen)
+    # denoiser              : trained diffusion model (eval mode)
+    # schedule              : TauNoiseSchedule (fitted at training time)
+    # latent_transform      : fitted LatentTauTransform (tau <-> z mapping)
+    # cfg                   : full config dict
+    # intraday_stats        : fitted IntraDayNormStats
+    # day_feat_stats        : fitted DayFeatureNormStats
+    # device                : torch device
+    # utc_offset_hours      : exact UTC offset (fractional hours) read from the
+    #                         first real profile's timestamps[0] by
+    #                         ``_utc_offset_from_profile``.  When provided, pvlib
+    #                         timestamps are anchored at exactly the same UTC point
+    #                         as the real profiles, eliminating the timestep shift.
+    #                         Falls back to round(lon/15) when None.
 
-    CSV output
-    ----------
-    If ``cfg["paths"]["output_csv"]`` is set, the generated timeseries is saved
-    to that path with one row per timestep: columns
-    ``date, timestep, generated[, real], clearsky_ghi, zenith``.
-    ``clearsky_ghi`` and ``zenith`` come from the same pvlib grid as
-    ``generated`` and are therefore guaranteed to be aligned with it
-    index-for-index (same pvlib timestamp anchor, same n_steps, same UTC offset).
+    # CSV output
+    # ----------
+    # If ``cfg["paths"]["output_csv"]`` is set, the generated timeseries is saved
+    # to that path with one row per timestep: columns
+    # ``date, timestep, generated[, real], clearsky_ghi, zenith``.
+    # ``clearsky_ghi`` and ``zenith`` come from the same pvlib grid as
+    # ``generated`` and are therefore guaranteed to be aligned with it
+    # index-for-index (same pvlib timestamp anchor, same n_steps, same UTC offset).
 
-    Returns
-    -------
-    output       : (N_days, T_full) float32 -- K* profiles, 0.0 at night/twilight
-    clearsky_ghi : (N_days, T_full) float32 -- pvlib Ineichen GHI W/m2
-    zenith       : (N_days, T_full) float32 -- solar zenith angle degrees
-    """
+    # Returns
+    # -------
+    # output       : (N_days, T_full) float32 -- K* profiles, 0.0 at night/twilight
+    # clearsky_ghi : (N_days, T_full) float32 -- pvlib Ineichen GHI W/m2
+    # zenith       : (N_days, T_full) float32 -- solar zenith angle degrees
+    # 
     dc       = cfg["diffusion"]
     ic       = cfg["inference"]
     pc       = cfg["physics"]
@@ -714,7 +711,7 @@ def generate_sequence(
     T_full     = n_steps
     location_t = torch.from_numpy(location_enc).unsqueeze(0).to(device)  # (1, 4)
 
-    # ── 4-class regime conditioning — self-consistent nearest-centroid feedback ──
+    #  4-class regime conditioning — self-consistent nearest-centroid feedback 
     # Load per-class τ centroids from latent_tau_stats.json (written by
     # fit_latent_tau_transform).  These are geometrically correct in the same
     # τ-space the denoiser operates in — fixes the old K*-to-τ heuristic that
@@ -736,7 +733,7 @@ def generate_sequence(
             "Regime conditioning uses null tokens throughout generation."
         )
 
-    # ── Regime feedback temperature ──────────────────────────────────────────
+    #  Regime feedback temperature 
     # Controls sharpness of centroid → label assignment.
     # Lower = nearer to hard argmax (self-reinforcing); higher = more uniform.
     # Default 0.5 balances self-consistency with regime diversity.
@@ -899,16 +896,16 @@ def generate_sequence(
     return output, all_clearsky_ghi, all_zenith
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # Test-set loader — extract real K* from a pre-built profile JSON
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 def load_test_profiles(test_profiles_path: str) -> List[Dict]:
-    """Load test profiles from the JSON file written by SolarPreprocessor.
+    # Load test profiles from the JSON file written by SolarPreprocessor.
 
-    Returns the raw list of profile dicts sorted by date, exactly as
-    SolarSequenceDataset would see them.
-    """
+    # Returns the raw list of profile dicts sorted by date, exactly as
+    # SolarSequenceDataset would see them.
+    # 
     import json
     with open(test_profiles_path) as f:
         profiles = json.load(f)
@@ -919,7 +916,7 @@ def load_test_profiles(test_profiles_path: str) -> List[Dict]:
 
 
 def test_set_date_range(profiles: List[Dict]) -> Tuple[str, str]:
-    """Return (first_date, last_date) of the test profiles as 'YYYY-MM-DD' strings."""
+    # Return (first_date, last_date) of the test profiles as 'YYYY-MM-DD' strings
     dates = sorted(p["date"] for p in profiles)
     return dates[0], dates[-1]
 
@@ -929,30 +926,30 @@ def extract_real_sequence(
     start_date: str,
     end_date: str,
     cfg: Dict,
-    intraday_stats,   # IntraDayNormStats  — used only to read zenith_threshold
+    intraday_stats,   # IntraDayNormStats -- used only to read zenith_threshold
 ) -> Tuple[np.ndarray, List[str]]:
-    """Extract the real K* (N, T_full) array from test profiles for a date range.
+    # Extract the real K* (N, T_full) array from test profiles for a date range.
 
-    Gap-tolerant: if the test profiles have missing days within the requested
-    date range (station outages, QC failures, etc.) those days are filled with
-    zeros in the real array and flagged as 'gap' in the returned dates list.
-    The returned array always has exactly one row per calendar day in the range,
-    so it aligns index-for-index with the generated sequence from
-    generate_sequence() which also covers every calendar day.
+    # Gap-tolerant: if the test profiles have missing days within the requested
+    # date range (station outages, QC failures, etc.) those days are filled with
+    # zeros in the real array and flagged as 'gap' in the returned dates list.
+    # The returned array always has exactly one row per calendar day in the range,
+    # so it aligns index-for-index with the generated sequence from
+    # generate_sequence() which also covers every calendar day.
 
-    Parameters
-    ----------
-    profiles    : sorted list of test profile dicts
-    start_date  : 'YYYY-MM-DD' (inclusive)
-    end_date    : 'YYYY-MM-DD' (inclusive)
-    cfg         : full config dict — reads zenith_threshold, inference_steps_per_day
-    intraday_stats : only used to resolve zenith_threshold; not applied to real data
+    # Parameters
+    # ----------
+    # profiles    : sorted list of test profile dicts
+    # start_date  : 'YYYY-MM-DD' (inclusive)
+    # end_date    : 'YYYY-MM-DD' (inclusive)
+    # cfg         : full config dict — reads zenith_threshold, inference_steps_per_day
+    # intraday_stats : only used to resolve zenith_threshold; not applied to real data
 
-    Returns
-    -------
-    real        : (N, T_full) float32  — K* with night=0.0; zeros for gap days
-    dates_used  : list of 'YYYY-MM-DD' strings in order (all calendar days)
-    """
+    # Returns
+    # -------
+    # real        : (N, T_full) float32  — K* with night=0.0; zeros for gap days
+    # dates_used  : list of 'YYYY-MM-DD' strings in order (all calendar days)
+    # 
     from data.physics_utils import extract_sunlit_mask
 
     z_thr  = cfg["data"]["zenith_threshold_deg"]
@@ -1033,36 +1030,37 @@ def generate_for_test_period(
     day_feat_stats,
     device: "torch.device",
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-    """Generate a sequence for a test-set date range AND extract the matching real data.
+    # Generate a sequence for a test-set date range AND extract the matching real data.
 
-    Gap-tolerant: if the test profiles have missing days within the requested
-    range, those days are filled with zeros in the real array.  The generated
-    array covers every calendar day regardless of gaps in the observed data,
-    since generation only needs pvlib solar geometry (no observations).
+    # Gap-tolerant: if the test profiles have missing days within the requested
+    # range, those days are filled with zeros in the real array.  The generated
+    # array covers every calendar day regardless of gaps in the observed data,
+    # since generation only needs pvlib solar geometry (no observations).
 
-    Both arrays have exactly one row per calendar day so they are index-aligned.
-    The caller can identify gap days by checking where real[i].sum() == 0 while
-    the calendar date lies within the expected sunlit season.
+    # Both arrays have exactly one row per calendar day so they are index-aligned.
+    # The caller can identify gap days by checking where real[i].sum() == 0 while
+    # the calendar date lies within the expected sunlit season.
 
-    Parameters
-    ----------
-    start_date / end_date : 'YYYY-MM-DD' inclusive
-    profiles              : test profiles loaded via load_test_profiles()
-    all other args        : same as generate_sequence()
+    # Parameters
+    # ----------
+    # start_date / end_date : 'YYYY-MM-DD' inclusive
+    # profiles              : test profiles loaded via load_test_profiles()
+    # all other args        : same as generate_sequence()
 
-    CSV output
-    ----------
-    If ``cfg["paths"]["output_csv"]`` is set, both timeseries are saved to that
-    path with one row per timestep: columns ``date, timestep, generated, real``.
+    # CSV output
+    # ----------
+    # If ``cfg["paths"]["output_csv"]`` is set, both timeseries are saved to that
+    # path with one row per timestep: columns ``date, timestep, generated, real``.
 
-    Returns
-    -------
-    generated    : (N, T_full) float32
-    real         : (N, T_full) float32  — zeros for gap days
-    dates        : list[str] of YYYY-MM-DD, one per calendar day in range
-    clearsky_ghi : (N, T_full) float32  — pvlib Ineichen GHI W/m2, aligned to generated
-    zenith       : (N, T_full) float32  — solar zenith degrees, aligned to generated
-    """
+    # Returns
+    # -------
+    # generated    : (N, T_full) float32
+    # real         : (N, T_full) float32  — zeros for gap days
+    # dates        : list[str] of YYYY-MM-DD, one per calendar day in range
+    # clearsky_ghi : (N, T_full) float32  — pvlib Ineichen GHI W/m2, aligned to generated
+    # zenith       : (N, T_full) float32  — solar zenith degrees, aligned to generated
+    
+    
     # Extract real data — gap-tolerant (no longer raises on missing days)
     real, dates_used = extract_real_sequence(
         profiles, start_date, end_date, cfg, intraday_stats
@@ -1139,7 +1137,7 @@ def generate_for_test_period(
 
 
 def _STATION_LATLON_FALLBACK(profile: Dict, coord: str = "lat") -> float:
-    """Resolve lat or lon from profile, falling back to the dataset station table."""
+    #Resolve lat or lon from profile, falling back to the dataset station table
     # Import lazily to avoid circular dependency
     from data.dataset import STATION_LATLON
     st = str(profile.get("station", "")).lower().strip()

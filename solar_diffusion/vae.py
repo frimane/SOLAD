@@ -1,91 +1,91 @@
-"""
-solar_diffusion/vae.py
------------------------
-Stage 1: Physics-conditioned deterministic 1-D Convolutional Autoencoder.
 
-Encoder  (B, T_sun, 2+3+N_obs) → z_full (B, d_z + z_var_dim)
-    Input channels: [K*, ΔK*, zenith_norm, ETR_norm, GCS_norm, obs...]
-    ΔK* = temporal difference of K* (ramp signal at every encoder depth).
-    N × _ConvBlock1d(stride, GroupNorm, per-timestep FiLM(physics), GELU)
-    → key-query attention pool
-    → Dropout → Linear(d_z)           → z_flat  (B, d_z)
-    → _ZVarHead(k_star, valid_mask)   → z_var   (B, z_var_dim)   [normalised intraday std]
-    → z_full = cat(z_flat, z_var)     (B, d_z + z_var_dim)
+# solar_diffusion/vae.py
+# -----------------------
+# Stage 1: Physics-conditioned deterministic 1-D Convolutional Autoencoder.
 
-    z_var encodes intraday variability character (std, ramp_rate, etc.) computed
-    directly from K* — not from conv features.  This captures the clear/overcast
-    distinction with a physics-grounded signal that is cheap to compute and
-    interpretable.
+# Encoder  (B, T_sun, 2+3+N_obs) → z_full (B, d_z + z_var_dim)
+#     Input channels: [K*, ΔK*, zenith_norm, ETR_norm, GCS_norm, obs...]
+#     ΔK* = temporal difference of K* (ramp signal at every encoder depth).
+#     N × _ConvBlock1d(stride, GroupNorm, per-timestep FiLM(physics), GELU)
+#     → key-query attention pool
+#     → Dropout → Linear(d_z)           → z_flat  (B, d_z)
+#     → _ZVarHead(k_star, valid_mask)   → z_var   (B, z_var_dim)   [normalised intraday std]
+#     → z_full = cat(z_flat, z_var)     (B, d_z + z_var_dim)
 
-    GENERATION-TIME CONTRACT:
-        The diffusion model learns to generate z_full jointly.
-        The decoder receives ONLY z_flat = z_full[:, :d_z] (sliced, no extra params).
-        The encoder is ABSENT at generation time — no mismatch possible.
-        z_var dims are diffusion-model inputs only; they never enter the decoder.
+#     z_var encodes intraday variability character (std, ramp_rate, etc.) computed
+#     directly from K* — not from conv features.  This captures the clear/overcast
+#     distinction with a physics-grounded signal that is cheap to compute and
+#     interpretable.
 
-Decoder  z_flat (B, d_z) + physics (B, T_sun, 3+2) → K̂* (B, T_sun) ∈ (0, k_max]
-    Linear(d_z → ch[0]*init_len)
-    → N × ConvTranspose1d(stride=2) + GroupNorm + FiLM(physics, masked mean)
-                                     + z-FiLM(z_flat global)
-                                     + PhysicsSkip(intraday_phys per-timestep)
-                                     + GELU
-    → interpolate(target_len)
-    → cat(per-timestep physics+Δphysics, z_proj broadcast over T)
-    → depthwise Conv1d(k=3) → pointwise Conv1d → GELU → Conv1d(1)
-    → sigmoid · k_max  +  α · physics_bypass(GCS_mean)
+#     GENERATION-TIME CONTRACT:
+#         The diffusion model learns to generate z_full jointly.
+#         The decoder receives ONLY z_flat = z_full[:, :d_z] (sliced, no extra params).
+#         The encoder is ABSENT at generation time — no mismatch possible.
+#         z_var dims are diffusion-model inputs only; they never enter the decoder.
 
-Physics-only skip connections inject intraday_phys at every decoder depth.
-No encoder feature maps used — fully generation-safe.
+# Decoder  z_flat (B, d_z) + physics (B, T_sun, 3+2) → K̂* (B, T_sun) ∈ (0, k_max]
+#     Linear(d_z → ch[0]*init_len)
+#     → N × ConvTranspose1d(stride=2) + GroupNorm + FiLM(physics, masked mean)
+#                                      + z-FiLM(z_flat global)
+#                                      + PhysicsSkip(intraday_phys per-timestep)
+#                                      + GELU
+#     → interpolate(target_len)
+#     → cat(per-timestep physics+Δphysics, z_proj broadcast over T)
+#     → depthwise Conv1d(k=3) → pointwise Conv1d → GELU → Conv1d(1)
+#     → sigmoid · k_max  +  α · physics_bypass(GCS_mean)
 
-Decoder improvements vs original (all generation-safe):
-  1. z-FiLM at every decoder block   — z_flat re-injected at each depth via γ(z),β(z)
-                                        zero-init → identity at startup
-  2. Δphysics input channels         — Δzenith, ΔETR added to decoder physics
-                                        captures solar geometry ramp structure
-  3. Depthwise-separable output head — local (k=3 depthwise) + global (pointwise)
-                                        better intraday shape capacity same params
-  4. Physics bypass lane             — learned α·GCS_baseline added to output
-                                        escape hatch for uninformative z (overcast)
-                                        α init=0 so no impact at startup
-  6. Physics-only skip connections   — intraday_phys projected to each decoder channel
-                                        width and injected as residual addition after
-                                        each deconv block. Gives the decoder fine-grained
-                                        per-timestep physics signal at every resolution
-                                        level, not just the bottleneck via FiLM.
-                                        GENERATION-SAFE: skips use only intraday_phys
-                                        (deterministic solar geometry), never K* or obs.
-                                        Controlled by cfg["vae"]["decoder_phys_skip"]
-                                        (default True). Zero-initialised output layer →
-                                        identity at startup, backward-compatible.
+# Physics-only skip connections inject intraday_phys at every decoder depth.
+# No encoder feature maps used — fully generation-safe.
 
-z_var improvement (improvement 5):
-  5. Variability latent z_var        — masked intraday std + optional ramp_rate of K*
-                                        projected to z_var_dim dims and normalised
-                                        by a running EMA (mean/std) so z_var lives on
-                                        the same scale as z_flat (~N(0,1) at steady state)
-                                        concatenated onto z_flat → z_full passed to diffusion
-                                        decoder only sees z_flat → no generation mismatch
+# Decoder improvements vs original (all generation-safe):
+#   1. z-FiLM at every decoder block   — z_flat re-injected at each depth via γ(z),β(z)
+#                                         zero-init → identity at startup
+#   2. Δphysics input channels         — Δzenith, ΔETR added to decoder physics
+#                                         captures solar geometry ramp structure
+#   3. Depthwise-separable output head — local (k=3 depthwise) + global (pointwise)
+#                                         better intraday shape capacity same params
+#   4. Physics bypass lane             — learned α·GCS_baseline added to output
+#                                         escape hatch for uninformative z (overcast)
+#                                         α init=0 so no impact at startup
+#   6. Physics-only skip connections   — intraday_phys projected to each decoder channel
+#                                         width and injected as residual addition after
+#                                         each deconv block. Gives the decoder fine-grained
+#                                         per-timestep physics signal at every resolution
+#                                         level, not just the bottleneck via FiLM.
+#                                         GENERATION-SAFE: skips use only intraday_phys
+#                                         (deterministic solar geometry), never K* or obs.
+#                                         Controlled by cfg["vae"]["decoder_phys_skip"]
+#                                         (default True). Zero-initialised output layer →
+#                                         identity at startup, backward-compatible.
 
-Regime classification uses 4 classes derived entirely from the fitted RegimeGMM
-(clear / mixed-clear / mixed-overcast / overcast). No thresholds are hardcoded
-anywhere in this file; all numeric parameters come from config.
+# z_var improvement (improvement 5):
+#   5. Variability latent z_var        — masked intraday std + optional ramp_rate of K*
+#                                         projected to z_var_dim dims and normalised
+#                                         by a running EMA (mean/std) so z_var lives on
+#                                         the same scale as z_flat (~N(0,1) at steady state)
+#                                         concatenated onto z_flat → z_full passed to diffusion
+#                                         decoder only sees z_flat → no generation mismatch
 
-Config keys for z_var (all under vae.*):
-    z_var_dim           int   number of z_var output dimensions (default 4)
-    z_var_proj_hidden   int   hidden size of z_var projection MLP (default 32)
-    z_var_ema_decay     float EMA decay for running normalisation (default 0.99)
-    z_var_use_ramp      bool  include masked ramp_rate feature in z_var input (default True)
+# Regime classification uses 4 classes derived entirely from the fitted RegimeGMM
+# (clear / mixed-clear / mixed-overcast / overcast). No thresholds are hardcoded
+# anywhere in this file; all numeric parameters come from config.
 
-Losses:
-    L_recon  = masked L1(K̂*, K*)
-    L_fft    = whitened FFT magnitude MSE
-    L_phase  = phase_weight · mean |∠FFT(k̂) − ∠FFT(k*)| at significant freqs
-    L_ramp   = multi-offset ramp MAE
-    L_curv   = curvature_weight · masked MAE on Δ²K*
-    L_spec   = spectral_weight · (L_fft + L_phase + L_ramp + L_curv)
-    L_sep    = 4-class prototype separation (clear / mx_clear / mx_overcast / overcast)
-    L_var    = soft lower-bound on per-dim latent std
-"""
+# Config keys for z_var (all under vae.*):
+#     z_var_dim           int   number of z_var output dimensions (default 4)
+#     z_var_proj_hidden   int   hidden size of z_var projection MLP (default 32)
+#     z_var_ema_decay     float EMA decay for running normalisation (default 0.99)
+#     z_var_use_ramp      bool  include masked ramp_rate feature in z_var input (default True)
+
+# Losses:
+#     L_recon  = masked L1(K̂*, K*)
+#     L_fft    = whitened FFT magnitude MSE
+#     L_phase  = phase_weight · mean |∠FFT(k̂) − ∠FFT(k*)| at significant freqs
+#     L_ramp   = multi-offset ramp MAE
+#     L_curv   = curvature_weight · masked MAE on Δ²K*
+#     L_spec   = spectral_weight · (L_fft + L_phase + L_ramp + L_curv)
+#     L_sep    = 4-class prototype separation (clear / mx_clear / mx_overcast / overcast)
+#     L_var    = soft lower-bound on per-dim latent std
+
 
 from typing import Dict, List, Optional, Tuple
 
@@ -94,18 +94,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Per-timestep FiLM  (encoder blocks)
-# ─────────────────────────────────────────────────────────────────────────────
 
 class _FiLMTimestep(nn.Module):
-    """Per-timestep FiLM for encoder conv blocks.
+    # Per-timestep FiLM for encoder conv blocks.
 
-    h' = (1 + γ(p_t)) ⊙ h + β(p_t)
+    # h' = (1 + γ(p_t)) ⊙ h + β(p_t)
 
-    Physics are pooled from T_sun → T_conv via adaptive average pooling to match
-    the downsampled conv feature map.
-    """
+    # Physics are pooled from T_sun → T_conv via adaptive average pooling to match
+    # the downsampled conv feature map.
+    
 
     def __init__(self, physics_dim: int, out_ch: int, hidden: int):
         super().__init__()
@@ -134,12 +132,10 @@ class _FiLMTimestep(nn.Module):
         return gamma * h + beta
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Encoder conv block
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Encoder conv block
 class _ConvBlock1d(nn.Module):
-    """Conv1d(stride) → GroupNorm(1,C) → [_FiLMTimestep(physics)] → GELU."""
+    #Conv1d(stride) → GroupNorm(1,C) → [_FiLMTimestep(physics)] → GELU
 
     def __init__(
         self,
@@ -169,16 +165,15 @@ class _ConvBlock1d(nn.Module):
         return self.act(h)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Global FiLM  (decoder blocks)
-# ─────────────────────────────────────────────────────────────────────────────
 
 class _FiLM(nn.Module):
-    """Global FiLM for decoder: h' = (1 + γ(p̄)) ⊙ h + β(p̄).
+    # Global FiLM for decoder: h' = (1 + γ(p̄)) ⊙ h + β(p̄).
 
-    p̄ = masked mean of intraday physics over valid timesteps.
-    Final layer zero-initialised → identity at init.
-    """
+    # p̄ = masked mean of intraday physics over valid timesteps.
+    # Final layer zero-initialised → identity at init.
+    
 
     def __init__(self, physics_dim: int, out_ch: int, hidden: int):
         super().__init__()
@@ -208,24 +203,21 @@ class _FiLM(nn.Module):
         return gamma * h + beta
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # z-FiLM  (decoder blocks — improvement 1)
-# ─────────────────────────────────────────────────────────────────────────────
 
 class _FiLMz(nn.Module):
-    """Per-block z injection for the decoder: h' = (1 + γ(z)) ⊙ h + β(z).
+    # Per-block z injection for the decoder: h' = (1 + γ(z)) ⊙ h + β(z).
 
-    Re-injects the latent code at every decoder depth so the "what kind of day"
-    signal is not diluted through 4 deconv stages.  This is particularly
-    important for overcast and mixed-overcast days whose z values differ most
-    from the clear-sky mode.
+    # Re-injects the latent code at every decoder depth so the "what kind of day"
+    # signal is not diluted through 4 deconv stages.  This is particularly
+    # important for overcast and mixed-overcast days whose z values differ most
+    # from the clear-sky mode.
 
-    Final layer zero-initialised → identity transform at startup.
-    Completely safe at generation time — z is always available.
+    # Final layer zero-initialised → identity transform at startup.
+    # Completely safe at generation time — z is always available.
 
-    Config key:
-        vae.decoder_z_film_hidden  int  hidden size of the MLP (default 32)
-    """
+    # Config key:
+    #     vae.decoder_z_film_hidden  int  hidden size of the MLP (default 32)
 
     def __init__(self, d_z: int, out_ch: int, hidden: int = 32):
         super().__init__()
@@ -246,49 +238,47 @@ class _FiLMz(nn.Module):
         return gamma * h + beta
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Physics-only skip connection  (improvement 6)
-# ─────────────────────────────────────────────────────────────────────────────
 
 class _PhysicsSkip(nn.Module):
-    """Per-timestep physics skip connection for decoder blocks.
+    # Per-timestep physics skip connection for decoder blocks.
 
-    Injects a fine-grained physics signal at each decoder resolution level as a
-    residual addition to the deconv feature map.
+    # Injects a fine-grained physics signal at each decoder resolution level as a
+    # residual addition to the deconv feature map.
 
-    WHY THIS IS GENERATION-SAFE
-    ----------------------------
-    The input is ONLY intraday_phys — the deterministic solar geometry tensor
-    (zenith_norm, ETR_norm, GCS_norm + optional Δzenith, ΔETR).  This is always
-    available at generation time because it is computed from ephemeris alone, with
-    no dependence on observed K* or obs_phys channels.
+    # WHY THIS IS GENERATION-SAFE
+    # ----------------------------
+    # The input is ONLY intraday_phys — the deterministic solar geometry tensor
+    # (zenith_norm, ETR_norm, GCS_norm + optional Δzenith, ΔETR).  This is always
+    # available at generation time because it is computed from ephemeris alone, with
+    # no dependence on observed K* or obs_phys channels.
 
-    The encoder is completely uninvolved.  This is NOT a U-Net skip carrying
-    encoder feature maps — it is a physics projection skip that provides the
-    decoder with per-timestep solar geometry context at each deconv depth.
+    # The encoder is completely uninvolved.  This is NOT a U-Net skip carrying
+    # encoder feature maps — it is a physics projection skip that provides the
+    # decoder with per-timestep solar geometry context at each deconv depth.
 
-    PROBLEM SOLVED
-    --------------
-    The existing FiLM conditioning injects physics as a *global* (masked-mean)
-    scale/shift.  After 4× downsampling, the decoder at the coarsest level sees
-    physics averaged over the whole day — it cannot tell whether a specific
-    timestep is at solar noon vs dawn.  The physics skip restores this per-timestep
-    resolution at every decoder depth by projecting the (B, T, dec_physics_dim)
-    tensor to (B, out_ch, T) and adding it to the feature map.
+    # PROBLEM SOLVED
+    # --------------
+    # The existing FiLM conditioning injects physics as a *global* (masked-mean)
+    # scale/shift.  After 4× downsampling, the decoder at the coarsest level sees
+    # physics averaged over the whole day — it cannot tell whether a specific
+    # timestep is at solar noon vs dawn.  The physics skip restores this per-timestep
+    # resolution at every decoder depth by projecting the (B, T, dec_physics_dim)
+    # tensor to (B, out_ch, T) and adding it to the feature map.
 
-    ARCHITECTURE
-    ------------
-        skip = Linear(dec_physics_dim → out_ch, applied per-timestep)
-             + zero-init output → identity at startup, backward-compatible
+    # ARCHITECTURE
+    # ------------
+    #     skip = Linear(dec_physics_dim → out_ch, applied per-timestep)
+    #          + zero-init output → identity at startup, backward-compatible
 
-    The physics tensor is adaptively interpolated to match the current deconv
-    output length T_dec (which varies by block depth), so no shape mismatches.
+    # The physics tensor is adaptively interpolated to match the current deconv
+    # output length T_dec (which varies by block depth), so no shape mismatches.
 
-    Config key:
-        vae.decoder_phys_skip  bool  enable/disable (default True)
-        vae.phys_skip_hidden   int   hidden dim of the projection MLP (default 0
-                                     means a single linear; set >0 for nonlinear)
-    """
+    # Config key:
+    #     vae.decoder_phys_skip  bool  enable/disable (default True)
+    #     vae.phys_skip_hidden   int   hidden dim of the projection MLP (default 0
+    #                                  means a single linear; set >0 for nonlinear)
+    #
 
     def __init__(self, dec_physics_dim: int, out_ch: int, hidden: int = 0):
         super().__init__()
@@ -314,11 +304,11 @@ class _PhysicsSkip(nn.Module):
         h:      torch.Tensor,   # (B, out_ch, T_dec)  — deconv output
         phys:   torch.Tensor,   # (B, T_sun, dec_physics_dim)  — augmented physics
     ) -> torch.Tensor:
-        """Add per-timestep physics residual to deconv feature map.
+        # Add per-timestep physics residual to deconv feature map.
 
-        phys is interpolated from T_sun → T_dec so the residual aligns with
-        the current decoder resolution regardless of stride/depth.
-        """
+        # phys is interpolated from T_sun → T_dec so the residual aligns with
+        # the current decoder resolution regardless of stride/depth.
+        
         B, C, T_dec = h.shape
 
         # Permute to (B, T_sun, dec_physics_dim) for linear, then back
@@ -338,19 +328,18 @@ class _PhysicsSkip(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _DeconvBlock1d(nn.Module):
-    """ConvTranspose1d(stride) → GroupNorm → global FiLM(physics) → z-FiLM(z)
-    → physics skip (improvement 6) → GELU.
+    # ConvTranspose1d(stride) → GroupNorm → global FiLM(physics) → z-FiLM(z)
+    # → physics skip (improvement 6) → GELU.
 
-    Improvement 1: z-FiLM re-injects the latent code at this depth so the
-    "what kind of day" signal is not diluted through the deconv stack.
-    Zero-initialised → identity at startup, backward-compatible.
+    # Improvement 1: z-FiLM re-injects the latent code at this depth so the
+    # "what kind of day" signal is not diluted through the deconv stack.
+    # Zero-initialised → identity at startup, backward-compatible.
 
-    Improvement 6: _PhysicsSkip adds a per-timestep physics residual after the
-    FiLM conditioning.  This gives each block fine-grained solar geometry context
-    at its own resolution level, not just the global mean from FiLM.
-    Zero-initialised → identity at startup.  Generation-safe (physics only).
-    Pass phys_skip=None to disable per-block (controlled by AEDecoder).
-    """
+    # Improvement 6: _PhysicsSkip adds a per-timestep physics residual after the
+    # FiLM conditioning.  This gives each block fine-grained solar geometry context
+    # at its own resolution level, not just the global mean from FiLM.
+    # Zero-initialised → identity at startup.  Generation-safe (physics only).
+    # Pass phys_skip=None to disable per-block (controlled by AEDecoder).
 
     def __init__(
         self,
@@ -403,38 +392,35 @@ class _DeconvBlock1d(nn.Module):
         return self.act(h)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # z_var head  (improvement 5)
-# ─────────────────────────────────────────────────────────────────────────────
-
 class _ZVarHead(nn.Module):
-    """Computes a variability latent z_var from K* statistics.
+    # Computes a variability latent z_var from K* statistics.
 
-    Input features computed from (k_star, valid_mask) — no conv features, no
-    encoder weights involved.  This means the features are:
-        - fully available at training time (k_star is the encoder input)
-        - ABSENT at generation time, which is correct: the diffusion model
-          generates z_var jointly with z_flat as part of z_full
+    # Input features computed from (k_star, valid_mask) — no conv features, no
+    # encoder weights involved.  This means the features are:
+    #     - fully available at training time (k_star is the encoder input)
+    #     - ABSENT at generation time, which is correct: the diffusion model
+    #       generates z_var jointly with z_flat as part of z_full
 
-    Features (2 or 3 scalars per sample, depending on z_var_use_ramp):
-        intraday_std   : masked std of K* over valid timesteps
-        mean_k         : masked mean of K* (separates clear from overcast level)
-        ramp_rate      : mean |ΔK*| over valid transitions  [if z_var_use_ramp]
+    # Features (2 or 3 scalars per sample, depending on z_var_use_ramp):
+    #     intraday_std   : masked std of K* over valid timesteps
+    #     mean_k         : masked mean of K* (separates clear from overcast level)
+    #     ramp_rate      : mean |ΔK*| over valid transitions  [if z_var_use_ramp]
 
-    These are projected to z_var_dim dimensions via a small MLP.
+    # These are projected to z_var_dim dimensions via a small MLP.
 
-    Normalisation:
-        A running EMA of (feature_mean, feature_std) is maintained during
-        training so that z_var lives on approximately the same scale as z_flat
-        at steady state.  The EMA is a non-parameter buffer updated only during
-        forward() when self.training is True (never during validation/inference).
+    # Normalisation:
+    #     A running EMA of (feature_mean, feature_std) is maintained during
+    #     training so that z_var lives on approximately the same scale as z_flat
+    #     at steady state.  The EMA is a non-parameter buffer updated only during
+    #     forward() when self.training is True (never during validation/inference).
 
-    Config keys (all under vae.*):
-        z_var_dim          int   output dims concatenated onto z_flat (default 4)
-        z_var_proj_hidden  int   MLP hidden size (default 32)
-        z_var_ema_decay    float EMA decay for running normalisation (default 0.99)
-        z_var_use_ramp     bool  include ramp_rate feature (default True)
-    """
+    # Config keys (all under vae.*):
+    #     z_var_dim          int   output dims concatenated onto z_flat (default 4)
+    #     z_var_proj_hidden  int   MLP hidden size (default 32)
+    #     z_var_ema_decay    float EMA decay for running normalisation (default 0.99)
+    #     z_var_use_ramp     bool  include ramp_rate feature (default True)
 
     def __init__(self, cfg: Dict):
         super().__init__()
@@ -484,24 +470,23 @@ class _ZVarHead(nn.Module):
 
     # ------------------------------------------------------------------
     def _normalise(self, feats: torch.Tensor) -> torch.Tensor:
-        """Normalise features using running EMA stats; update EMA during training.
+        # Normalise features using running EMA stats; update EMA during training.
 
-        FIX H3: Added fast-warmup EMA and convergence diagnostics.
+        # FIX H3: Added fast-warmup EMA and convergence diagnostics.
 
-        Root cause of original asymmetry: EMA decay=0.99 is very slow.
-        With ~200 batches/epoch, the EMA needs ~5 epochs to approach the true
-        feature mean. During this period z_var dims carry a large systematic
-        bias (e.g. mean_k≈0.7 for clear-dominated data enters the diffusion
-        model un-centred), producing the asymmetric dim distributions observed.
+        # Root cause of original asymmetry: EMA decay=0.99 is very slow.
+        # With ~200 batches/epoch, the EMA needs ~5 epochs to approach the true
+        # feature mean. During this period z_var dims carry a large systematic
+        # bias (e.g. mean_k≈0.7 for clear-dominated data enters the diffusion
+        # model un-centred), producing the asymmetric dim distributions observed.
 
-        Fix 1 — Fast warmup: use decay=0.50 for the first 20 updates, then
-        ramp up to the configured decay over the next 80 updates.
-        At decay=0.50 the EMA reaches 99% of the true mean in ~7 batches.
-        At decay=0.99 it takes ~460 batches. Warmup closes this gap.
+        # Fix 1 — Fast warmup: use decay=0.50 for the first 20 updates, then
+        # ramp up to the configured decay over the next 80 updates.
+        # At decay=0.50 the EMA reaches 99% of the true mean in ~7 batches.
+        # At decay=0.99 it takes ~460 batches. Warmup closes this gap.
 
-        Fix 2 — Convergence diagnostic: log _feat_mean and _feat_std every
-        500 forward calls so asymmetry is visible without running diagnostics.
-        """
+        # Fix 2 — Convergence diagnostic: log _feat_mean and _feat_std every
+        # 500 forward calls so asymmetry is visible without running diagnostics.
         if self.training:
             batch_mean = feats.mean(dim=0).detach()
             batch_std  = feats.std(dim=0).clamp(min=1e-6).detach()
@@ -554,30 +539,27 @@ class _ZVarHead(nn.Module):
         return self.mlp(feats)
 
     def force_reset_ema(self) -> None:
-        """FIX H3: Reset EMA state so a resumed run starts fresh.
+        # FIX H3: Reset EMA state so a resumed run starts fresh.
 
-        Called by train_vae() after loading a checkpoint. Without this,
-        stale EMA state from a previous run (potentially with different data
-        distribution or collapsed z_std) persists into the new run and causes
-        the first epoch to have systematically wrong z_var normalisation.
-        """
+        # Called by train_vae() after loading a checkpoint. Without this,
+        # stale EMA state from a previous run (potentially with different data
+        # distribution or collapsed z_std) persists into the new run and causes
+        # the first epoch to have systematically wrong z_var normalisation.
         self._feat_mean.zero_()
         self._feat_std.fill_(1.0)
         self._ema_initialised = False
         self._ema_step = 0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Encoder
-# ─────────────────────────────────────────────────────────────────────────────
 
 class AEEncoder(nn.Module):
-    """Deterministic 1-D convolutional encoder.
+    # Deterministic 1-D convolutional encoder.
 
-    Input : (B, T_padded, 2 + physics_dim + N_obs)
-            channels = [K*, ΔK*, zenith_norm, ETR_norm, GCS_norm, obs_channels...]
-    Output: z (B, d_z), [] — empty list for API compatibility.
-    """
+    # Input : (B, T_padded, 2 + physics_dim + N_obs)
+    #         channels = [K*, ΔK*, zenith_norm, ETR_norm, GCS_norm, obs_channels...]
+    # Output: z (B, d_z), [] — empty list for API compatibility.
 
     def __init__(self, cfg: Dict):
         super().__init__()
@@ -614,7 +596,7 @@ class AEEncoder(nn.Module):
         h:          torch.Tensor,   # (B, C, T_conv)
         valid_mask: torch.Tensor,   # (B, T_sun) bool
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Key-query attention pool → (B, C) pooled, (B, T_conv) weights."""
+        #Key-query attention pool → (B, C) pooled, (B, T_conv) weights
         B, C, T_conv = h.shape
         mask_down = F.adaptive_max_pool1d(
             valid_mask.float().unsqueeze(1), T_conv
@@ -663,54 +645,54 @@ class AEEncoder(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class AEDecoder(nn.Module):
-    """Physics-conditioned 1-D convolutional decoder with physics-only skip connections.
+    # Physics-conditioned 1-D convolutional decoder with physics-only skip connections.
 
-    Input : z (B, d_z) + physics (B, T_sun, physics_dim) + target_len int
-    Output: K̂* (B, T_sun) in (0, k_max]
+    # Input : z (B, d_z) + physics (B, T_sun, physics_dim) + target_len int
+    # Output: K̂* (B, T_sun) in (0, k_max]
 
-    Improvements vs original (all generation-safe — no encoder signals used):
+    # Improvements vs original (all generation-safe — no encoder signals used):
 
-    1. z-FiLM at every deconv block
-       Each _DeconvBlock1d now receives z and applies γ(z),β(z) after the
-       physics FiLM.  Zero-init → identity at startup.
+    # 1. z-FiLM at every deconv block
+    #    Each _DeconvBlock1d now receives z and applies γ(z),β(z) after the
+    #    physics FiLM.  Zero-init → identity at startup.
 
-    2. Δphysics input channels (Δzenith, ΔETR)
-       Two extra channels appended to the physics tensor fed into the decoder:
-       the temporal differences of zenith_norm and ETR_norm. These encode the
-       solar geometry ramp rate — available at generation time without K*.
-       Controlled by cfg["vae"]["decoder_delta_physics"] (default True).
+    # 2. Δphysics input channels (Δzenith, ΔETR)
+    #    Two extra channels appended to the physics tensor fed into the decoder:
+    #    the temporal differences of zenith_norm and ETR_norm. These encode the
+    #    solar geometry ramp rate — available at generation time without K*.
+    #    Controlled by cfg["vae"]["decoder_delta_physics"] (default True).
 
-    3. Depthwise-separable output refinement
-       Replaces the single Conv1d(C, C, k=3) with:
-         depthwise  Conv1d(C, C, k=3, groups=C)  — local intraday shape
-         pointwise  Conv1d(C, C, k=1)             — channel mixing
-       Same parameter count, better capacity for shape prediction.
+    # 3. Depthwise-separable output refinement
+    #    Replaces the single Conv1d(C, C, k=3) with:
+    #      depthwise  Conv1d(C, C, k=3, groups=C)  — local intraday shape
+    #      pointwise  Conv1d(C, C, k=1)             — channel mixing
+    #    Same parameter count, better capacity for shape prediction.
 
-    4. Physics bypass lane
-       A small branch computes k_bypass = sigmoid(Linear(physics_dim, 1))·k_max
-       from the masked physics mean. A learned scalar α (init=0) blends it into
-       the output: k_out = k_decoder + α·k_bypass.
-       α=0 at startup → no effect. Gradient flows freely so α grows only if the
-       bypass helps. Gives overcast days an escape hatch when z is uninformative.
+    # 4. Physics bypass lane
+    #    A small branch computes k_bypass = sigmoid(Linear(physics_dim, 1))·k_max
+    #    from the masked physics mean. A learned scalar α (init=0) blends it into
+    #    the output: k_out = k_decoder + α·k_bypass.
+    #    α=0 at startup → no effect. Gradient flows freely so α grows only if the
+    #    bypass helps. Gives overcast days an escape hatch when z is uninformative.
 
-    6. Physics-only skip connections (improvement 6)
-       At each deconv block, a _PhysicsSkip module projects the full-resolution
-       intraday_phys (B, T_sun, dec_physics_dim) to the block's channel width and
-       adds it as a per-timestep residual.  This gives every decoder block access
-       to precise solar geometry at its own resolution level — not just the global
-       mean that FiLM provides.
-       GENERATION-SAFE: only uses intraday_phys (deterministic ephemeris).
-       Zero-init → identity at startup.
-       Controlled by cfg["vae"]["decoder_phys_skip"] (default True).
-       MLP hidden width: cfg["vae"]["phys_skip_hidden"] (default 0 = linear only).
+    # 6. Physics-only skip connections (improvement 6)
+    #    At each deconv block, a _PhysicsSkip module projects the full-resolution
+    #    intraday_phys (B, T_sun, dec_physics_dim) to the block's channel width and
+    #    adds it as a per-timestep residual.  This gives every decoder block access
+    #    to precise solar geometry at its own resolution level — not just the global
+    #    mean that FiLM provides.
+    #    GENERATION-SAFE: only uses intraday_phys (deterministic ephemeris).
+    #    Zero-init → identity at startup.
+    #    Controlled by cfg["vae"]["decoder_phys_skip"] (default True).
+    #    MLP hidden width: cfg["vae"]["phys_skip_hidden"] (default 0 = linear only).
 
-    Config keys:
-        vae.decoder_z_film_hidden   int   hidden for z-FiLM MLPs (default 32)
-        vae.decoder_delta_physics   bool  add Δzenith,ΔETR to decoder (default True)
-        vae.decoder_z_proj_dim      int   z broadcast projection dim (default 32)
-        vae.decoder_phys_skip       bool  enable physics skip connections (default True)
-        vae.phys_skip_hidden        int   hidden dim in skip MLP; 0 = linear (default 0)
-    """
+    # Config keys:
+    #     vae.decoder_z_film_hidden   int   hidden for z-FiLM MLPs (default 32)
+    #     vae.decoder_delta_physics   bool  add Δzenith,ΔETR to decoder (default True)
+    #     vae.decoder_z_proj_dim      int   z broadcast projection dim (default 32)
+    #     vae.decoder_phys_skip       bool  enable physics skip connections (default True)
+    #     vae.phys_skip_hidden        int   hidden dim in skip MLP; 0 = linear (default 0)
+    # 
 
     def __init__(self, cfg: Dict):
         super().__init__()
@@ -798,13 +780,13 @@ class AEDecoder(nn.Module):
         physics:    torch.Tensor,    # (B, T_sun, physics_dim)  original
         valid_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """Optionally append Δzenith, ΔETR to physics tensor (improvement 2).
+        # Optionally append Δzenith, ΔETR to physics tensor (improvement 2).
 
-        Δp_t = p_t − p_{t-1}, masked so only differences between two valid
-        timesteps are non-zero.  First valid timestep gets Δ=0.
-        This mirrors the ΔK* channel in the encoder, giving the decoder a ramp
-        signal derived purely from solar geometry — available at generation time.
-        """
+        # Δp_t = p_t − p_{t-1}, masked so only differences between two valid
+        # timesteps are non-zero.  First valid timestep gets Δ=0.
+        # This mirrors the ΔK* channel in the encoder, giving the decoder a ramp
+        # signal derived purely from solar geometry — available at generation time.
+        # 
         if not self._use_delta_physics:
             return physics
 
@@ -881,36 +863,35 @@ class AEDecoder(nn.Module):
         return k_out.clamp(1e-6, self.k_max)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Full Autoencoder
-# ─────────────────────────────────────────────────────────────────────────────
 
 class SolarVAE(nn.Module):
-    """Physics-conditioned deterministic autoencoder for daily K* profiles.
+    # Physics-conditioned deterministic autoencoder for daily K* profiles.
 
-    encode() → (z_full, [])
-        z_full = cat(z_flat, z_var)  shape (B, d_z + z_var_dim)
-        z_flat  — shape latent, fed to decoder via z-FiLM
-        z_var   — variability latent, fed to diffusion model only
-        Pass z_full to regime_separation_loss() and the diffusion model.
+    # encode() → (z_full, [])
+    #     z_full = cat(z_flat, z_var)  shape (B, d_z + z_var_dim)
+    #     z_flat  — shape latent, fed to decoder via z-FiLM
+    #     z_var   — variability latent, fed to diffusion model only
+    #     Pass z_full to regime_separation_loss() and the diffusion model.
 
-    decode(z_full_or_flat, ...) → K̂* (B, T_sun) ∈ (0, k_max]
-        Accepts either z_full (B, d_z + z_var_dim) OR z_flat (B, d_z).
-        Always slices z_full[:, :d_z] so the decoder only ever sees z_flat.
-        At generation time the diffusion model produces z_full; passing it
-        here is safe — the z_var tail is silently ignored by the decoder.
+    # decode(z_full_or_flat, ...) → K̂* (B, T_sun) ∈ (0, k_max]
+    #     Accepts either z_full (B, d_z + z_var_dim) OR z_flat (B, d_z).
+    #     Always slices z_full[:, :d_z] so the decoder only ever sees z_flat.
+    #     At generation time the diffusion model produces z_full; passing it
+    #     here is safe — the z_var tail is silently ignored by the decoder.
 
-    forward() → (K̂*, z_full)
+    # forward() → (K̂*, z_full)
 
-    GENERATION-TIME CONTRACT:
-        Diffusion model generates z_full (d_z + z_var_dim dims) jointly.
-        Decoder receives z_full[:, :d_z] = z_flat.  Encoder absent.  No mismatch.
+    # GENERATION-TIME CONTRACT:
+    #     Diffusion model generates z_full (d_z + z_var_dim dims) jointly.
+    #     Decoder receives z_full[:, :d_z] = z_flat.  Encoder absent.  No mismatch.
 
-    Config key added:
-        vae.z_var_dim  int  — number of z_var dimensions (default 4).
-        Also see _ZVarHead for additional config keys.
-        The diffusion model's input_dim must be set to d_z + z_var_dim = d_z_full.
-    """
+    # Config key added:
+    #     vae.z_var_dim  int  — number of z_var dimensions (default 4).
+    #     Also see _ZVarHead for additional config keys.
+    #     The diffusion model's input_dim must be set to d_z + z_var_dim = d_z_full.
+    # 
 
     def __init__(self, cfg: Dict):
         super().__init__()
@@ -926,8 +907,8 @@ class SolarVAE(nn.Module):
         k_star:     torch.Tensor,
         valid_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """ΔK*_t = K*_t − K*_{t-1}, masked so only differences between two valid
-        timesteps are non-zero. First valid timestep gets ΔK*=0."""
+        # ΔK*_t = K*_t − K*_{t-1}, masked so only differences between two valid
+        # timesteps are non-zero. First valid timestep gets ΔK*=0
         d = torch.zeros_like(k_star)
         d[:, 1:] = (k_star[:, 1:] - k_star[:, :-1]) * valid_mask[:, :-1].float()
         return d
@@ -939,13 +920,13 @@ class SolarVAE(nn.Module):
         valid_mask:    torch.Tensor,
         obs_phys:      Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, list]:
-        """Returns (z_full, []) where z_full = cat(z_flat, z_var).
+        # Returns (z_full, []) where z_full = cat(z_flat, z_var).
 
-        z_full shape: (B, d_z + z_var_dim)  — pass this to the diffusion model
-                                               and to regime_separation_loss().
-        The decoder slices z_full[:, :d_z] internally, so z_full is always safe
-        to pass to decode() regardless of whether z_var dims are appended.
-        """
+        # z_full shape: (B, d_z + z_var_dim)  — pass this to the diffusion model
+        #                                        and to regime_separation_loss().
+        # The decoder slices z_full[:, :d_z] internally, so z_full is always safe
+        # to pass to decode() regardless of whether z_var dims are appended.
+        
         dk    = self._delta_k(k_star, valid_mask)
         parts = [k_star.unsqueeze(-1), dk.unsqueeze(-1), intraday_phys]
         if obs_phys is not None and obs_phys.shape[-1] > 0:
@@ -963,12 +944,12 @@ class SolarVAE(nn.Module):
         valid_mask:    torch.Tensor,
         obs_phys:      Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """(z_full, attn_entropy) — entropy diagnostic for training health logging.
+        # z_full, attn_entropy) — entropy diagnostic for training health logging.
 
-        z_full = cat(z_flat, z_var) as in encode().
-        attn_entropy is computed from the attention weights of the z_flat encoder
-        only (z_var is a direct statistic of K*, not attention-derived).
-        """
+        # z_full = cat(z_flat, z_var) as in encode().
+        # attn_entropy is computed from the attention weights of the z_flat encoder
+        # only (z_var is a direct statistic of K*, not attention-derived).
+        
         dk    = self._delta_k(k_star, valid_mask)
         parts = [k_star.unsqueeze(-1), dk.unsqueeze(-1), intraday_phys]
         if obs_phys is not None and obs_phys.shape[-1] > 0:
@@ -994,13 +975,13 @@ class SolarVAE(nn.Module):
         skips:         Optional[list] = None,
         use_encoder:   bool = False,
     ) -> torch.Tensor:
-        """Decode z to K̂*.
+        # Decode z to K̂*.
 
-        Accepts either z_flat (B, d_z) or z_full (B, d_z + z_var_dim).
-        Always slices z[:, :d_z] so only z_flat reaches the decoder.
-        This means you can pass z_full from encode() or from the diffusion
-        model at generation time without any changes — z_var is silently dropped.
-        """
+        # Accepts either z_flat (B, d_z) or z_full (B, d_z + z_var_dim).
+        # Always slices z[:, :d_z] so only z_flat reaches the decoder.
+        # This means you can pass z_full from encode() or from the diffusion
+        # model at generation time without any changes — z_var is silently dropped.
+        
         z_flat = z[:, :self.d_z]   # safe for both z_flat and z_full inputs
         return self.decoder(z_flat, intraday_phys, target_len, valid_mask=valid_mask)
 
@@ -1011,13 +992,13 @@ class SolarVAE(nn.Module):
         valid_mask:    torch.Tensor,
         obs_phys:      Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns (k_hat, z_full).
+        # Returns (k_hat, z_full).
 
-        z_full = cat(z_flat, z_var) shape (B, d_z + z_var_dim).
-        Pass z_full to regime_separation_loss() — the loss uses the full code
-        so separation is enforced across the complete latent representation.
-        The decoder internally slices z_flat = z_full[:, :d_z].
-        """
+        # z_full = cat(z_flat, z_var) shape (B, d_z + z_var_dim).
+        # Pass z_full to regime_separation_loss() — the loss uses the full code
+        # so separation is enforced across the complete latent representation.
+        # The decoder internally slices z_flat = z_full[:, :d_z].
+        
         z_full, _ = self.encode(k_star, intraday_phys, valid_mask, obs_phys)
         k_hat     = self.decode(z_full, intraday_phys, k_star.shape[-1],
                                 valid_mask=valid_mask)
@@ -1041,15 +1022,15 @@ def ae_loss(
     phase_amp_threshold: float = 0.0,
     ramp_offset_steps:   int   = 1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Masked L1 + whitened FFT magnitude + phase + ramp MAE + curvature.
+    # Masked L1 + whitened FFT magnitude + phase + ramp MAE + curvature.
 
-    All numeric parameters are passed in from config — no defaults encode
-    design choices. sample_weight is applied to the full per-sample loss
-    (L_recon + spectral) so regime-specific loss weighting also applies to
-    the spectral terms where ramp fidelity is measured.
+    # All numeric parameters are passed in from config — no defaults encode
+    # design choices. sample_weight is applied to the full per-sample loss
+    # (L_recon + spectral) so regime-specific loss weighting also applies to
+    # the spectral terms where ramp fidelity is measured.
 
-    Returns (total_loss, recon_loss).
-    """
+    # Returns (total_loss, recon_loss).
+    
     mask_f      = valid_mask.float()
     n_valid_per = mask_f.sum(dim=1).clamp(min=1.0)
     B_sz        = k_hat.shape[0]
@@ -1161,9 +1142,8 @@ def ae_loss(
         return (l1_per + spectral_w * spectral_per).mean(), recon
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Loss: regime_separation_loss  (4-class)
-# ─────────────────────────────────────────────────────────────────────────────
 
 # Module-level EMA registry, keyed by (stage, device, alpha) — train calls only.
 # Val calls must NOT update this dict; the caller (_run_vae_epoch) is responsible
@@ -1178,30 +1158,30 @@ def regime_separation_loss(
     tau0:       Optional[torch.Tensor] = None,
     stage:      str = "vae",
 ) -> Tuple[torch.Tensor, bool]:
-    """Four-class prototype separation in z-space (Stage 1) or τ-space (Stage 2).
+    # Four-class prototype separation in z-space (Stage 1) or τ-space (Stage 2).
 
-    Classes (from RegimeGMM, 4 components):
-        0 = clear
-        1 = mixed-clear  (partially clear, low variability)
-        2 = mixed-overcast (partially cloudy, high variability)
-        3 = overcast
+    # Classes (from RegimeGMM, 4 components):
+    #     0 = clear
+    #     1 = mixed-clear  (partially clear, low variability)
+    #     2 = mixed-overcast (partially cloudy, high variability)
+    #     3 = overcast
 
-    The margin is derived from an EMA of the observed clear–overcast centroid
-    distance (d_co), scaled by dynamic_margin_alpha so it sits below the running
-    average. The loss fires whenever the current batch d_co falls below the
-    historical target, preventing separation from shrinking.
+    # The margin is derived from an EMA of the observed clear–overcast centroid
+    # distance (d_co), scaled by dynamic_margin_alpha so it sits below the running
+    # average. The loss fires whenever the current batch d_co falls below the
+    # historical target, preventing separation from shrinking.
 
-    This function must only be called during training steps. The EMA is global
-    state — calling it during validation would corrupt the training margin target.
+    # This function must only be called during training steps. The EMA is global
+    # state — calling it during validation would corrupt the training margin target.
 
-    Config keys read from cfg["vae"]:
-        regime_sep_weight         float  (required)
-        dynamic_margin_alpha      float  fraction of EMA to use as target margin
-        mixed_margin_scale        float  inner-class margin = margin_co × this
-        mixed_sep_weight          float  weight for inner-class separation terms
-        regime_sep_min_samples    int    min samples per class to compute loss
-        sep_ema_decay             float  EMA decay for margin tracking
-    """
+    # Config keys read from cfg["vae"]:
+    #     regime_sep_weight         float  (required)
+    #     dynamic_margin_alpha      float  fraction of EMA to use as target margin
+    #     mixed_margin_scale        float  inner-class margin = margin_co × this
+    #     mixed_sep_weight          float  weight for inner-class separation terms
+    #     regime_sep_min_samples    int    min samples per class to compute loss
+    #     sep_ema_decay             float  EMA decay for margin tracking
+    
     vc       = cfg["vae"]
     sep_w    = float(vc["regime_sep_weight"])
     alpha    = float(vc["dynamic_margin_alpha"])
@@ -1298,16 +1278,15 @@ def regime_separation_loss(
 
 
 def reset_sep_ema(stage: str = "vae") -> None:
-    """Remove all EMA entries for a given stage. Call when resuming from checkpoint
-    to prevent stale EMA state from a previous run corrupting the new margin target."""
+    # Remove all EMA entries for a given stage. Call when resuming from checkpoint
+    # to prevent stale EMA state from a previous run corrupting the new margin target
     keys_to_remove = [k for k in _sep_ema_registry if k.startswith(stage)]
     for k in keys_to_remove:
         del _sep_ema_registry[k]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+#
 # Loss: latent variance penalty
-# ─────────────────────────────────────────────────────────────────────────────
 
 def latent_variance_penalty(
     z:                  torch.Tensor,
@@ -1317,31 +1296,31 @@ def latent_variance_penalty(
     z_std_upper_target: Optional[float]        = None,
     variance_weight_upper: float               = 0.0,
 ) -> torch.Tensor:
-    """Two-sided soft penalty on per-dimension latent standard deviation.
+    # Two-sided soft penalty on per-dimension latent standard deviation.
 
-    Lower bound (always active):
-        Fires whenever mean per-dim std < z_std_target.
-        Prevents latent collapse after the separation loss is reduced.
+    # Lower bound (always active):
+    #     Fires whenever mean per-dim std < z_std_target.
+    #     Prevents latent collapse after the separation loss is reduced.
 
-    Upper bound (active when z_std_upper_target is provided):
-        Fires whenever mean per-dim std > z_std_upper_target.
-        Prevents z_std runaway when separation loss is strong — the root cause
-        of the gradient explosion seen in training (z_std 0.35→2.4 unchecked).
-        Uses a much smaller weight (variance_weight_upper) so it provides
-        counter-pressure without dominating the reconstruction loss.
+    # Upper bound (active when z_std_upper_target is provided):
+    #     Fires whenever mean per-dim std > z_std_upper_target.
+    #     Prevents z_std runaway when separation loss is strong — the root cause
+    #     of the gradient explosion seen in training (z_std 0.35→2.4 unchecked).
+    #     Uses a much smaller weight (variance_weight_upper) so it provides
+    #     counter-pressure without dominating the reconstruction loss.
 
-    smoothed_z_std: EMA of per-dim std accumulated across the epoch — prevents
-    a single high-variance batch from silencing the lower-bound for a step when
-    the global distribution is actually collapsed.
+    # smoothed_z_std: EMA of per-dim std accumulated across the epoch — prevents
+    # a single high-variance batch from silencing the lower-bound for a step when
+    # the global distribution is actually collapsed.
 
-    All parameters are passed from config — no defaults encode design choices.
+    # All parameters are passed from config — no defaults encode design choices.
 
-    Config keys read:
-        vae.z_std_target            float  lower-bound target (required)
-        vae.z_var_weight            float  weight for lower-bound (required)
-        vae.z_std_upper_target      float  upper-bound target (optional; None = off)
-        vae.z_var_weight_upper      float  weight for upper-bound (optional; 0 = off)
-    """
+    # Config keys read:
+    #     vae.z_std_target            float  lower-bound target (required)
+    #     vae.z_var_weight            float  weight for lower-bound (required)
+    #     vae.z_std_upper_target      float  upper-bound target (optional; None = off)
+    #     vae.z_var_weight_upper      float  weight for upper-bound (optional; 0 = off)
+    # 
     if smoothed_z_std is not None:
         current_std = smoothed_z_std.mean()
     else:

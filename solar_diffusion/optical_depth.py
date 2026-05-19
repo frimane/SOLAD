@@ -1,47 +1,47 @@
-"""
-solar_diffusion/optical_depth.py
-----------------------------------
-Optical-depth reparameterisation and noise schedule.
+#
+# solar_diffusion/optical_depth.py
+# ----------------------------------
+# Optical-depth reparameterisation and noise schedule.
 
-Beer-Lambert: K*(t) = K_max · exp(−τ(t)), τ ≥ 0.
-Clear sky (K* = K_max) → τ = 0.  Total overcast (K* → 0) → τ → ∞.
-This maps the bounded K* domain onto the half-line where Gaussian noise is valid.
+# Beer-Lambert: K*(t) = K_max · exp(−τ(t)), τ ≥ 0.
+# Clear sky (K* = K_max) → τ = 0.  Total overcast (K* → 0) → τ → ∞.
+# This maps the bounded K* domain onto the half-line where Gaussian noise is valid.
 
-Stage 2 diffuses AE latent codes z ∈ R^{d_z} in τ-space:
-  1. z   = vae.encode(k_star, physics, mask)
-  2. τ_0 = LatentTauTransform.to_tau_space(z)       per-dim normalise → τ map
-  3. τ_k = √ᾱ_k·τ_0 + √(1−ᾱ_k)·ε                 forward diffusion
-  4. denoiser predicts v from τ_k
-  5. τ̂_0 = √ᾱ_k·τ_k − √(1−ᾱ_k)·v̂_k              inverse v-prediction
-  6. z̃   = LatentTauTransform.from_tau_space(τ̂_0)   invert τ → z
-  7. K̂*  = vae.decode(z̃, physics, target_len)
+# Stage 2 diffuses AE latent codes z ∈ R^{d_z} in τ-space:
+#   1. z   = vae.encode(k_star, physics, mask)
+#   2. τ_0 = LatentTauTransform.to_tau_space(z)       per-dim normalise → τ map
+#   3. τ_k = √ᾱ_k·τ_0 + √(1−ᾱ_k)·ε                 forward diffusion
+#   4. denoiser predicts v from τ_k
+#   5. τ̂_0 = √ᾱ_k·τ_k − √(1−ᾱ_k)·v̂_k              inverse v-prediction
+#   6. z̃   = LatentTauTransform.from_tau_space(τ̂_0)   invert τ → z
+#   7. K̂*  = vae.decode(z̃, physics, target_len)
 
-Noise schedule: cosine ᾱ (Nichol & Dhariwal 2021).
-As k→T: ᾱ_k → alpha_bar_min ≈ 0, so τ_k → ε (pure Gaussian noise).
-The τ reparameterisation is an inductive bias on latent geometry — clear days
-encode near τ≈0, overcast near large τ.
+# Noise schedule: cosine ᾱ (Nichol & Dhariwal 2021).
+# As k→T: ᾱ_k → alpha_bar_min ≈ 0, so τ_k → ε (pure Gaussian noise).
+# The τ reparameterisation is an inductive bias on latent geometry — clear days
+# encode near τ≈0, overcast near large τ.
 
-Affine standardisation:
-  Raw τ ∈ [0, τ_max] has std ≈ 0.48, which compresses signal relative to the
-  unit-Gaussian noise prior.  LatentTauTransform.fit() measures τ_mu and τ_sig
-  from the training set and standardises so the diffused distribution has
-  mean≈0 and std≈1.
+# Affine standardisation:
+#   Raw τ ∈ [0, τ_max] has std ≈ 0.48, which compresses signal relative to the
+#   unit-Gaussian noise prior.  LatentTauTransform.fit() measures τ_mu and τ_sig
+#   from the training set and standardises so the diffused distribution has
+#   mean≈0 and std≈1.
 
-  The clamp bounds used in p_sample / p_sample_ddim are kept SYMMETRIC around
-  zero in standardised space:
-      tau_min_std = −tau_max_std   where  tau_max_std = (τ_max_raw − τ_mu) / τ_sig
-  This prevents asymmetric clamping from biasing the reverse chain toward the
-  overcast end of τ-space (the core bug fixed here).  Values that fall below
-  −tau_max_std decode to physical τ < 0 and are harmlessly clamped to zero by
-  from_tau_space(), so the Beer-Lambert constraint is still enforced.
+#   The clamp bounds used in p_sample / p_sample_ddim are kept SYMMETRIC around
+#   zero in standardised space:
+#       tau_min_std = −tau_max_std   where  tau_max_std = (τ_max_raw − τ_mu) / τ_sig
+#   This prevents asymmetric clamping from biasing the reverse chain toward the
+#   overcast end of τ-space (the core bug fixed here).  Values that fall below
+#   −tau_max_std decode to physical τ < 0 and are harmlessly clamped to zero by
+#   from_tau_space(), so the Beer-Lambert constraint is still enforced.
 
-  Always call latent_transform.tau_clamp_bounds() and pass its result as
-  (tau_min, tau_max) to p_sample / p_sample_ddim.  Never use the raw defaults.
+#   Always call latent_transform.tau_clamp_bounds() and pass its result as
+#   (tau_min, tau_max) to p_sample / p_sample_ddim.  Never use the raw defaults.
 
-v-prediction (Salimans & Ho 2022):
-  v_k   = √ᾱ_k·ε − √(1−ᾱ_k)·τ_0
-  τ̂_0  = √ᾱ_k·τ_k − √(1−ᾱ_k)·v̂_k
-"""
+# v-prediction (Salimans & Ho 2022):
+#   v_k   = √ᾱ_k·ε − √(1−ᾱ_k)·τ_0
+#   τ̂_0  = √ᾱ_k·τ_k − √(1−ᾱ_k)·v̂_k
+
 
 import json
 import logging
@@ -54,9 +54,9 @@ import torch
 log = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+#
 # Primal maps: K* ↔ τ
-# ─────────────────────────────────────────────────────────────────────────────
+#
 
 def kstar_to_tau(k: torch.Tensor, k_max: float, eps: float = 1e-6) -> torch.Tensor:
     """K* → τ = −log(K* / k_max).  Returns τ ≥ 0."""
@@ -69,55 +69,55 @@ def tau_to_kstar(tau: torch.Tensor, k_max: float) -> torch.Tensor:
     return (k_max * torch.exp(-tau.clamp(min=0.0))).clamp(0.0, k_max)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # LatentTauTransform — per-dimension normalisation + τ map for z-space
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 class LatentTauTransform:
-    """Per-dimension normalisation of AE latents followed by τ mapping.
+    # Per-dimension normalisation of AE latents followed by τ mapping.
 
-    Normalises each latent dimension j to (0, k_max] using per-dimension
-    bounds fitted from the training set, then applies τ = −log(z_norm/k_max).
+    # Normalises each latent dimension j to (0, k_max] using per-dimension
+    # bounds fitted from the training set, then applies τ = −log(z_norm/k_max).
 
-    Polarity correction: the encoder assigns dimension directions arbitrarily.
-    Dims where clear days have lower mean z than cloudy days produce inverted
-    tau (clear > cloudy tau).  fit() detects these dims from regime_labels and
-    stores a flip mask; to_tau_space() reflects those dims before normalisation
-    so that high-z = clear universally.  from_tau_space() undoes the flip.
+    # Polarity correction: the encoder assigns dimension directions arbitrarily.
+    # Dims where clear days have lower mean z than cloudy days produce inverted
+    # tau (clear > cloudy tau).  fit() detects these dims from regime_labels and
+    # stores a flip mask; to_tau_space() reflects those dims before normalisation
+    # so that high-z = clear universally.  from_tau_space() undoes the flip.
 
-    Affine standardisation: fit() computes τ_mu (mean over training samples)
-    and τ_sig (std) in raw τ-space and standardises so the diffusion prior
-    N(0,1) matches the data distribution.  Both are scalar — per-dimension
-    stats would require storing a (d_z,) vector and re-fitting the denoiser;
-    a scalar correction is sufficient to fix the 2× noise-signal compression
-    without altering the model architecture.
+    # Affine standardisation: fit() computes τ_mu (mean over training samples)
+    # and τ_sig (std) in raw τ-space and standardises so the diffusion prior
+    # N(0,1) matches the data distribution.  Both are scalar — per-dimension
+    # stats would require storing a (d_z,) vector and re-fitting the denoiser;
+    # a scalar correction is sufficient to fix the 2× noise-signal compression
+    # without altering the model architecture.
 
-    CLAMP SYMMETRY CONTRACT
-    -----------------------
-    tau_clamp_bounds() returns (tau_min_std, tau_max_std) where
-        tau_min_std = −tau_max_std   (symmetric around 0)
-    This is intentional.  The asymmetric alternative
-        tau_min_std = (0 − tau_mu) / tau_sig   (physical lower bound)
-    clips the clear-sky tail only ~1.5 standardised units below zero while
-    allowing ~4.25 units of headroom on the overcast side, which biases the
-    reverse chain toward mixed/overcast.  The symmetric clamp lets values
-    overshoot the physical floor in standardised space; from_tau_space() then
-    applies tau.clamp(min=0) to enforce Beer-Lambert before the exp-map, so
-    the physical constraint is preserved at the correct stage.
+    # CLAMP SYMMETRY CONTRACT
+    # -----------------------
+    # tau_clamp_bounds() returns (tau_min_std, tau_max_std) where
+    #     tau_min_std = −tau_max_std   (symmetric around 0)
+    # This is intentional.  The asymmetric alternative
+    #     tau_min_std = (0 − tau_mu) / tau_sig   (physical lower bound)
+    # clips the clear-sky tail only ~1.5 standardised units below zero while
+    # allowing ~4.25 units of headroom on the overcast side, which biases the
+    # reverse chain toward mixed/overcast.  The symmetric clamp lets values
+    # overshoot the physical floor in standardised space; from_tau_space() then
+    # applies tau.clamp(min=0) to enforce Beer-Lambert before the exp-map, so
+    # the physical constraint is preserved at the correct stage.
 
-    τ range after normalisation (raw): [0, τ_max] where τ_max = −log(z_norm_clamp_lo).
-    τ range after standardisation: centred near 0, std ≈ 1.
+    # τ range after normalisation (raw): [0, τ_max] where τ_max = −log(z_norm_clamp_lo).
+    # τ range after standardisation: centred near 0, std ≈ 1.
 
-    Workflow:
-        transform = LatentTauTransform(k_max=cfg["physics"]["k_max"])
-        transform.fit(latents, regime_labels)
-        transform.save(cfg["paths"]["latent_tau_stats"])
-        # --- Stage 2 / generation ---
-        transform.load(cfg["paths"]["latent_tau_stats"])
-        tau0           = transform.to_tau_space(z)
-        tau_min, tau_max = transform.tau_clamp_bounds()
-        z_hat          = transform.from_tau_space(tau_hat)
-    """
+    # Workflow:
+    #     transform = LatentTauTransform(k_max=cfg["physics"]["k_max"])
+    #     transform.fit(latents, regime_labels)
+    #     transform.save(cfg["paths"]["latent_tau_stats"])
+    #     # --- Stage 2 / generation ---
+    #     transform.load(cfg["paths"]["latent_tau_stats"])
+    #     tau0           = transform.to_tau_space(z)
+    #     tau_min, tau_max = transform.tau_clamp_bounds()
+    #     z_hat          = transform.from_tau_space(tau_hat)
+    # 
 
     def __init__(self, k_max: float, z_norm_clamp_lo: float = 0.01):
         self.k_max           = k_max
@@ -148,29 +148,29 @@ class LatentTauTransform:
         polarity_min_samples: int = 10,
         d_z_flat: Optional[int] = None,   # cfg["vae"]["latent_dim"] — enables per-split affine stats
     ) -> None:
-        """Fit per-dimension bounds from a (N, d_z) array of training latents.
+        # Fit per-dimension bounds from a (N, d_z) array of training latents.
 
-        d_z_flat : number of z_flat dimensions (cfg["vae"]["latent_dim"]).
-            When provided, separate affine standardisation stats are computed
-            for z_flat dims (0:d_z_flat) vs the full array. from_tau_space()
-            uses these when inverting only z_flat to avoid z_var's narrower
-            range corrupting the tau_mu / tau_sig estimates.
-            Pass cfg["vae"]["latent_dim"] here from train_diffusion().
+        # d_z_flat : number of z_flat dimensions (cfg["vae"]["latent_dim"]).
+        #     When provided, separate affine standardisation stats are computed
+        #     for z_flat dims (0:d_z_flat) vs the full array. from_tau_space()
+        #     uses these when inverting only z_flat to avoid z_var's narrower
+        #     range corrupting the tau_mu / tau_sig estimates.
+        #     Pass cfg["vae"]["latent_dim"] here from train_diffusion().
 
-        Uses percentile-based bounds (p1/p99 default) plus a margin of
-        std_margin_factor × per-dim std, making the transform robust to
-        outliers and latent mean drift.
+        # Uses percentile-based bounds (p1/p99 default) plus a margin of
+        # std_margin_factor × per-dim std, making the transform robust to
+        # outliers and latent mean drift.
 
-        Polarity correction: if regime_labels (0=clear, 1+=cloudy) is provided,
-        dims where mean_z[clear] < mean_z[cloudy] are stored in _flip_dims and
-        reflected in to_tau_space so that high-z = clear universally.
+        # Polarity correction: if regime_labels (0=clear, 1+=cloudy) is provided,
+        # dims where mean_z[clear] < mean_z[cloudy] are stored in _flip_dims and
+        # reflected in to_tau_space so that high-z = clear universally.
 
-        Affine standardisation: τ_mu and τ_sig are computed as the mean and std
-        of raw τ values over the entire training set (after polarity flip and
-        log-map, before standardisation).  The mean is computed per-sample first
-        and then averaged, so that latent dimensions with systematically higher
-        tau do not inflate the scalar unduly.  τ_sig is clamped to ≥ 0.01.
-        """
+        # Affine standardisation: τ_mu and τ_sig are computed as the mean and std
+        # of raw τ values over the entire training set (after polarity flip and
+        # log-map, before standardisation).  The mean is computed per-sample first
+        # and then averaged, so that latent dimensions with systematically higher
+        # tau do not inflate the scalar unduly.  τ_sig is clamped to ≥ 0.01.
+        # 
         if z_array.ndim != 2:
             raise ValueError(f"z_array must be 2-D (N, d_z), got {z_array.shape}")
         d_z = z_array.shape[1]
@@ -299,7 +299,7 @@ class LatentTauTransform:
         log.info("LatentTauTransform saved → %s", path)
 
     def load(self, path: str | Path) -> None:
-        """Load statistics from a previously saved JSON file."""
+        #Load statistics from a previously saved JSON file
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(
@@ -350,21 +350,21 @@ class LatentTauTransform:
         tau_mean_tol: float = 0.5,
         tau_std_tol: float  = 0.4,
     ) -> bool:
-        """FIX C6: Check whether loaded affine stats match the current encoder output.
+        # FIX C6: Check whether loaded affine stats match the current encoder output.
 
-        The affine stats (tau_mu, tau_sig) are fitted once on the training latent
-        cache and frozen. If z_std drifted during VAE training, the saved stats are
-        wrong for the current encoder — causing 2-3× tau_std miscalibration that
-        degrades the SNR at every diffusion step.
+        # The affine stats (tau_mu, tau_sig) are fitted once on the training latent
+        # cache and frozen. If z_std drifted during VAE training, the saved stats are
+        # wrong for the current encoder — causing 2-3× tau_std miscalibration that
+        # degrades the SNR at every diffusion step.
 
-        Args:
-            z_sample    : (N, d_z) float32 array of current-encoder latent codes.
-            tau_mean_tol: warn if |observed_tau_mean - fitted_tau_mu| > this.
-            tau_std_tol : warn if |observed_tau_std/fitted_tau_sig - 1| > this.
+        # Args:
+        #     z_sample    : (N, d_z) float32 array of current-encoder latent codes.
+        #     tau_mean_tol: warn if |observed_tau_mean - fitted_tau_mu| > this.
+        #     tau_std_tol : warn if |observed_tau_std/fitted_tau_sig - 1| > this.
 
-        Returns True if stats match within tolerance, False if re-fitting is needed.
-        Called by train_diffusion() after loading the transform on resume.
-        """
+        # Returns True if stats match within tolerance, False if re-fitting is needed.
+        # Called by train_diffusion() after loading the transform on resume.
+        
         self._check()
         import torch as _torch
         z_t   = _torch.from_numpy(z_sample.astype(np.float32))
@@ -409,27 +409,27 @@ class LatentTauTransform:
         return ok
 
     def tau_clamp_bounds(self) -> Tuple[float, float]:
-        """Return (tau_min_std, tau_max_std) for clamping τ̂₀ in p_sample / p_sample_ddim.
+        # Return (tau_min_std, tau_max_std) for clamping τ̂₀ in p_sample / p_sample_ddim.
 
-        The bounds are SYMMETRIC around zero in standardised space:
-            tau_max_std = (τ_max_raw − τ_mu) / τ_sig
-            tau_min_std = −tau_max_std
+        # The bounds are SYMMETRIC around zero in standardised space:
+        #     tau_max_std = (τ_max_raw − τ_mu) / τ_sig
+        #     tau_min_std = −tau_max_std
 
-        Symmetry is critical.  Using the physical lower bound as tau_min_std:
-            tau_min_std = (0 − τ_mu) / τ_sig   ← DO NOT USE
-        produces an asymmetric clamp (e.g. [−1.5, +4.25]) that clips the
-        clear-sky tail 3× more aggressively than the overcast tail, biasing
-        the reverse chain toward mixed/overcast profiles.
+        # Symmetry is critical.  Using the physical lower bound as tau_min_std:
+        #     tau_min_std = (0 − τ_mu) / τ_sig   ← DO NOT USE
+        # produces an asymmetric clamp (e.g. [−1.5, +4.25]) that clips the
+        # clear-sky tail 3× more aggressively than the overcast tail, biasing
+        # the reverse chain toward mixed/overcast profiles.
 
-        The symmetric clamp allows τ̂₀ to go slightly below −tau_max_std in
-        standardised space (i.e. physically below τ=0).  from_tau_space()
-        applies tau.clamp(min=0) before the exp-map, so Beer-Lambert is still
-        satisfied — the physical constraint is enforced at the right stage.
+        # The symmetric clamp allows τ̂₀ to go slightly below −tau_max_std in
+        # standardised space (i.e. physically below τ=0).  from_tau_space()
+        # applies tau.clamp(min=0) before the exp-map, so Beer-Lambert is still
+        # satisfied — the physical constraint is enforced at the right stage.
 
-        Always call this method and pass its output explicitly to p_sample /
-        p_sample_ddim.  Never rely on the default argument values of those
-        methods, which are stale placeholders.
-        """
+        # Always call this method and pass its output explicitly to p_sample /
+        # p_sample_ddim.  Never rely on the default argument values of those
+        # methods, which are stale placeholders.
+        # 
         self._check()
         tau_max_raw = float(-np.log(self.z_norm_clamp_lo))   # e.g. −log(0.01) = 4.605
         tau_max_std = (tau_max_raw - self._tau_mu) / self._tau_sig
@@ -437,17 +437,17 @@ class LatentTauTransform:
         return tau_min_std, tau_max_std
 
     def to_tau_space(self, z: torch.Tensor) -> torch.Tensor:
-        """Normalise z → (0, k_max] per-dimension (with polarity flip), then
-        apply τ = −log(·/k_max) and affine standardisation.
+        # Normalise z → (0, k_max] per-dimension (with polarity flip), then
+        # apply τ = −log(·/k_max) and affine standardisation.
 
-        Returns standardised τ with mean≈0, std≈1 over the training set.
-        z : (..., d_z) AE latent codes, any leading batch shape.
+        # Returns standardised τ with mean≈0, std≈1 over the training set.
+        # z : (..., d_z) AE latent codes, any leading batch shape.
 
-        Emits a warning when > 5% of dimensions hit the z_norm_clamp_lo lower
-        bound — this signals latent codes outside the training-set distribution
-        (unfitted transform or distribution shift) and those dims are forced to
-        the τ_max extreme (heavy-overcast end).
-        """
+        # Emits a warning when > 5% of dimensions hit the z_norm_clamp_lo lower
+        # bound — this signals latent codes outside the training-set distribution
+        # (unfitted transform or distribution shift) and those dims are forced to
+        # the τ_max extreme (heavy-overcast end).
+        # 
         self._check()
         dev   = z.device
         z_min = torch.from_numpy(self._z_min).to(dev)
@@ -480,32 +480,32 @@ class LatentTauTransform:
         return (tau - self._tau_mu) / self._tau_sig
 
     def from_tau_space(self, tau: torch.Tensor) -> torch.Tensor:
-        """Invert standardised τ → z (original AE scale), undoing polarity flip.
+        # Invert standardised τ → z (original AE scale), undoing polarity flip.
 
-        tau : (..., d_in) standardised optical-depth codes from the denoiser.
-              d_in may be less than the total fitted dimensionality — for
-              example when only z_flat dims ([:d_z_flat]) are passed, excluding
-              z_var dims, as part of the z_var saturation fix.  The fitted
-              arrays _z_min / _z_max / _flip_dims are sliced to [:d_in]
-              automatically so the caller does not need to know the exact split.
+        # tau : (..., d_in) standardised optical-depth codes from the denoiser.
+        #       d_in may be less than the total fitted dimensionality — for
+        #       example when only z_flat dims ([:d_z_flat]) are passed, excluding
+        #       z_var dims, as part of the z_var saturation fix.  The fitted
+        #       arrays _z_min / _z_max / _flip_dims are sliced to [:d_in]
+        #       automatically so the caller does not need to know the exact split.
 
-        Affine stats selection:
-          If d_in == _d_z_flat and per-split stats (_tau_mu_flat, _tau_sig_flat)
-          are available, those are used instead of the global stats.  This is
-          critical because z_var dims (appended after z_flat) have a ~4× narrower
-          value range; their tau values inflate _tau_mu and deflate _tau_sig,
-          causing the global affine inversion to produce wrong z_flat values.
-          Per-split stats avoid this without requiring architectural changes.
+        # Affine stats selection:
+        #   If d_in == _d_z_flat and per-split stats (_tau_mu_flat, _tau_sig_flat)
+        #   are available, those are used instead of the global stats.  This is
+        #   critical because z_var dims (appended after z_flat) have a ~4× narrower
+        #   value range; their tau values inflate _tau_mu and deflate _tau_sig,
+        #   causing the global affine inversion to produce wrong z_flat values.
+        #   Per-split stats avoid this without requiring architectural changes.
 
-        Inverse pipeline:
-          1. Undo standardisation: τ_raw = τ_std × τ_sig + τ_mu
-          2. Clamp τ_raw ≥ 0  (Beer-Lambert requires τ ≥ 0; v-prediction can
-             produce slightly negative values — clamped here, not in p_sample)
-          3. Invert log-map: z_norm = k_max · exp(−τ_raw)
-          4. Invert per-dim normalisation: z = z_norm/k_max × denom + z_min
-          5. Undo polarity flip on affected dims
-          6. Safety clamp z to [z_min, z_max]
-        """
+        # Inverse pipeline:
+        #   1. Undo standardisation: τ_raw = τ_std × τ_sig + τ_mu
+        #   2. Clamp τ_raw ≥ 0  (Beer-Lambert requires τ ≥ 0; v-prediction can
+        #      produce slightly negative values — clamped here, not in p_sample)
+        #   3. Invert log-map: z_norm = k_max · exp(−τ_raw)
+        #   4. Invert per-dim normalisation: z = z_norm/k_max × denom + z_min
+        #   5. Undo polarity flip on affected dims
+        #   6. Safety clamp z to [z_min, z_max]
+        # 
         self._check()
         dev  = tau.device
         d_in  = tau.shape[-1]
@@ -560,16 +560,15 @@ class LatentTauTransform:
         return z
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Cosine α̅ noise schedule
-# ─────────────────────────────────────────────────────────────────────────────
 
 class TauNoiseSchedule:
-    """Cosine (or linear) α̅ noise schedule for diffusion in τ-space.
+    # Cosine (or linear) α̅ noise schedule for diffusion in τ-space.
 
-    Forward process: τ_k = √ᾱ_k·τ_0 + √(1−ᾱ_k)·ε
-    As k→T: ᾱ_k → alpha_bar_min ≈ 0, so τ_k → ε (pure Gaussian noise).
-    """
+    # Forward process: τ_k = √ᾱ_k·τ_0 + √(1−ᾱ_k)·ε
+    # As k→T: ᾱ_k → alpha_bar_min ≈ 0, so τ_k → ε (pure Gaussian noise).
+    
 
     def __init__(
         self,
@@ -620,11 +619,11 @@ class TauNoiseSchedule:
         k: torch.Tensor,
         noise: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward process: τ_k = √ᾱ_k·τ_0 + √(1−ᾱ_k)·ε.  Returns (tau_k, noise).
+        # Forward process: τ_k = √ᾱ_k·τ_0 + √(1−ᾱ_k)·ε.  Returns (tau_k, noise).
 
-        k may be (B,) — one step per window — or (B, W) — one step per day.
-        tau0 is (B, W, d_z). Coefficients broadcast over the d_z dimension.
-        """
+        # k may be (B,) — one step per window — or (B, W) — one step per day.
+        # tau0 is (B, W, d_z). Coefficients broadcast over the d_z dimension.
+        
         if noise is None:
             noise = torch.randn_like(tau0)
         k = k.long()
@@ -645,10 +644,10 @@ class TauNoiseSchedule:
         noise: torch.Tensor,
         k: torch.Tensor,
     ) -> torch.Tensor:
-        """v-prediction target: v = √ᾱ_k·ε − √(1−ᾱ_k)·τ_0.
+        # v-prediction target: v = √ᾱ_k·ε − √(1−ᾱ_k)·τ_0.
 
-        k may be (B,) or (B, W) — same broadcasting logic as q_sample.
-        """
+        # k may be (B,) or (B, W) — same broadcasting logic as q_sample.
+        
         k = k.long()
         if k.dim() == 1:
             sab = self.sqrt_alpha_bars[k].view(-1, 1, 1)
@@ -668,24 +667,24 @@ class TauNoiseSchedule:
         tau_max: float = 4.605,  # upper clamp in standardised τ-space
         tau_min: float = -4.605, # lower clamp in standardised τ-space (symmetric)
     ) -> torch.Tensor:           # (B, W, d_z) denoised τ at step k-1
-        """Single DDPM reverse step: τ_k → τ_{k-1}.
+        # Single DDPM reverse step: τ_k → τ_{k-1}.
 
-        Recovers τ̂_0 from v-prediction, clamps it to the valid τ domain, then
-        samples the posterior q(τ_{k-1} | τ_k, τ̂_0).  Returns τ̂_0 at k=0.
+        # Recovers τ̂_0 from v-prediction, clamps it to the valid τ domain, then
+        # samples the posterior q(τ_{k-1} | τ_k, τ̂_0).  Returns τ̂_0 at k=0.
 
-        IMPORTANT — always pass tau_min and tau_max from
-        latent_transform.tau_clamp_bounds(), not the default values.  The
-        defaults are symmetric placeholders matching z_norm_clamp_lo=0.01 with
-        identity standardisation (tau_mu=0, tau_sig=1); they will be wrong for
-        any fitted transform with non-identity parameters.
+        # IMPORTANT — always pass tau_min and tau_max from
+        # latent_transform.tau_clamp_bounds(), not the default values.  The
+        # defaults are symmetric placeholders matching z_norm_clamp_lo=0.01 with
+        # identity standardisation (tau_mu=0, tau_sig=1); they will be wrong for
+        # any fitted transform with non-identity parameters.
 
-        The clamp is intentionally SYMMETRIC: tau_min = −tau_max.  This
-        prevents the reverse chain from being biased toward the overcast end
-        of τ-space.  See LatentTauTransform.tau_clamp_bounds() for details.
+        # The clamp is intentionally SYMMETRIC: tau_min = −tau_max.  This
+        # prevents the reverse chain from being biased toward the overcast end
+        # of τ-space.  See LatentTauTransform.tau_clamp_bounds() for details.
 
-        Schedule is 0-indexed: alpha_bars[i] = ā_{i+1}.
-        At k=1, ā_0 = 1.0 (no variance at t=0).
-        """
+        # Schedule is 0-indexed: alpha_bars[i] = ā_{i+1}.
+        # At k=1, ā_0 = 1.0 (no variance at t=0).
+        
         ab_k  = self.alpha_bars[k]
         sab_k = self.sqrt_alpha_bars[k]
         som_k = self.sqrt_one_minus[k]
@@ -706,14 +705,14 @@ class TauNoiseSchedule:
         return mu + beta_tilde.sqrt() * torch.randn_like(tau_k)
 
     def build_ddim_steps(self, ddim_steps: int) -> List[int]:
-        """Return a list of `ddim_steps` evenly-spaced timestep indices for DDIM.
+        # Return a list of `ddim_steps` evenly-spaced timestep indices for DDIM.
 
-        Indices are in descending order (T-1 down to 0), i.e. the order they
-        are visited during the reverse process.  The final step is always 0
-        so that τ̂_0 is returned exactly without a posterior step.
+        # Indices are in descending order (T-1 down to 0), i.e. the order they
+        # are visited during the reverse process.  The final step is always 0
+        # so that τ̂_0 is returned exactly without a posterior step.
 
-        Example: T=1000, ddim_steps=50 → [999, 979, 959, ..., 19, 0]
-        """
+        # Example: T=1000, ddim_steps=50 → [999, 979, 959, ..., 19, 0]
+        
         if ddim_steps >= self.T:
             return list(reversed(range(self.T)))
         indices = [round(i * (self.T - 1) / (ddim_steps - 1))
@@ -734,35 +733,35 @@ class TauNoiseSchedule:
         tau_max: float = 4.605,  # upper clamp in standardised τ-space
         tau_min: float = -4.605, # lower clamp in standardised τ-space (symmetric)
     ) -> torch.Tensor:           # (B, W, d_z) denoised τ at step k_prev
-        """Single DDIM reverse step: τ_k → τ_{k_prev}  (Song et al. 2021).
+        # Single DDIM reverse step: τ_k → τ_{k_prev}  (Song et al. 2021).
 
-        With eta=0 (default) this is fully deterministic.  With eta=1 it
-        recovers DDPM-like stochasticity.
+        # With eta=0 (default) this is fully deterministic.  With eta=1 it
+        # recovers DDPM-like stochasticity.
 
-        IMPORTANT — always pass tau_min and tau_max from
-        latent_transform.tau_clamp_bounds().  The defaults are symmetric
-        placeholders for identity standardisation only.
+        # IMPORTANT — always pass tau_min and tau_max from
+        # latent_transform.tau_clamp_bounds().  The defaults are symmetric
+        # placeholders for identity standardisation only.
 
-        The clamp on τ̂₀ is SYMMETRIC (tau_min = −tau_max) to prevent
-        overcast bias.  from_tau_space() enforces τ_raw ≥ 0 via clamp(min=0)
-        before the exp-map, so Beer-Lambert is still satisfied.
+        # The clamp on τ̂₀ is SYMMETRIC (tau_min = −tau_max) to prevent
+        # overcast bias.  from_tau_space() enforces τ_raw ≥ 0 via clamp(min=0)
+        # before the exp-map, so Beer-Lambert is still satisfied.
 
-        ε̂ is re-derived from the clamped τ̂₀ so that the DDIM direction
-        vector is self-consistent with the clamped prediction:
-            ε̂ = (τ_k − √ᾱ_k · τ̂₀) / √(1−ᾱ_k)
+        # ε̂ is re-derived from the clamped τ̂₀ so that the DDIM direction
+        # vector is self-consistent with the clamped prediction:
+        #     ε̂ = (τ_k − √ᾱ_k · τ̂₀) / √(1−ᾱ_k)
 
-        At the final step (k_prev == −1) returns τ̂_0 directly.
+        # At the final step (k_prev == −1) returns τ̂_0 directly.
 
-        Reference: Song et al. (2021) "Denoising Diffusion Implicit Models"
-        https://arxiv.org/abs/2010.02502
+        # Reference: Song et al. (2021) "Denoising Diffusion Implicit Models"
+        # https://arxiv.org/abs/2010.02502
 
-        v-prediction form (Salimans & Ho 2022):
-            τ̂_0  = √ᾱ_k · τ_k − √(1−ᾱ_k) · v̂
-            ε̂   = √ᾱ_k · v̂  + √(1−ᾱ_k) · τ_k
-            τ_{k_prev} = √ᾱ_{k_prev} · τ̂_0
-                         + √(1−ᾱ_{k_prev} − σ²) · ε̂
-                         + σ · ε   (ε ~ N(0,I) if eta > 0 else 0)
-        """
+        # v-prediction form (Salimans & Ho 2022):
+        #     τ̂_0  = √ᾱ_k · τ_k − √(1−ᾱ_k) · v̂
+        #     ε̂   = √ᾱ_k · v̂  + √(1−ᾱ_k) · τ_k
+        #     τ_{k_prev} = √ᾱ_{k_prev} · τ̂_0
+        #                  + √(1−ᾱ_{k_prev} − σ²) · ε̂
+        #                  + σ · ε   (ε ~ N(0,I) if eta > 0 else 0)
+        
         ab_k  = self.alpha_bars[k]
         sab_k = self.sqrt_alpha_bars[k]
         som_k = self.sqrt_one_minus[k]

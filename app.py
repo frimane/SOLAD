@@ -1,18 +1,10 @@
-# SOLAD - Solar Irradiance Timeseries Generator
-
-
-# ==============================================================================
-# STDLIB IMPORTS
-# ==============================================================================
 import io
 import logging
 import random
 from datetime import date, timedelta
 from pathlib import Path
 
-# ==============================================================================
-# THIRD-PARTY IMPORTS
-# ==============================================================================
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -35,14 +27,10 @@ import yaml
 #   scipy.stats                     - gaussian_kde  (inside plot_statistics)
 # ==============================================================================
 
-# ==============================================================================
 # APP METADATA
-# ==============================================================================
 APP_VERSION = "v1.0.0"
 
-# ==============================================================================
 # FILE PATHS  -  every path lives here; nowhere else in this file
-# ==============================================================================
 REPO_ROOT      = Path(__file__).parent
 CONFIG_PATH    = REPO_ROOT / "config.yaml"
 VAE_PATH       = REPO_ROOT / "inference_bundle" / "vae_weights.pt"
@@ -69,19 +57,15 @@ REQUIRED_FILES: list = [
 ]
 OPTIONAL_FILES: list = [GMM_PATH]
 
-# ==============================================================================
 # INPUT VALIDATION CONSTANTS  - single source of truth for all bounds
-# ==============================================================================
 LAT_MIN,  LAT_MAX  = -90.0,   90.0
 LON_MIN,  LON_MAX  = -180.0, 180.0
 DATE_MIN           = date(2000,  1,  1)
 DATE_MAX           = date(2100, 12, 31)
-MAX_DAYS           = 730    # hard cap - refuses generation beyond this
-WARN_DAYS          = 365    # shows performance warning above this
+MAX_DAYS           = 365    # hard cap - refuses generation beyond this
+WARN_DAYS          = 180    # shows performance warning above this
 
-# ==============================================================================
 # MATPLOTLIB / LOGGING SETUP
-# ==============================================================================
 plt.rcParams.update({
     "figure.dpi":          200,
     "savefig.dpi":         200,
@@ -106,9 +90,7 @@ plt.rcParams.update({
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# ==============================================================================
 # STATION METADATA
-# ==============================================================================
 STATION_META = {
     "BON": {"lat": 40.05192,  "lon": -88.37309,  "name": "Bondville, IL",          "climate": "Humid continental"},
     "DRA": {"lat": 36.62373,  "lon": -116.01947, "name": "Desert Rock, NV",        "climate": "Hot desert"},
@@ -119,9 +101,7 @@ STATION_META = {
     "TBL": {"lat": 40.12498,  "lon": -105.23680, "name": "Table Mountain, CO",     "climate": "Semi-arid, high altitude"},
 }
 
-# ==============================================================================
 # MATPLOTLIB PALETTE
-# ==============================================================================
 _P = dict(
     amber  = "#e8b84b",
     blue   = "#5b9bd5",
@@ -133,9 +113,7 @@ _P = dict(
     border = "#1a2e48",
 )
 
-# ==============================================================================
 # PAGE CONFIG  (must come before any other st.* call)
-# ==============================================================================
 st.set_page_config(
     page_title="SOLAD - Solar Irradiance Generator",
     layout="wide",
@@ -148,10 +126,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ==============================================================================
 # CSS
 # KEY: hide ALL streamlit chrome so position:fixed on .solad-nav works correctly
-# ==============================================================================
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&family=Syne:wght@400;500;600;700;800&display=swap');
@@ -648,9 +624,7 @@ html { scroll-behavior: smooth !important; }
 """, unsafe_allow_html=True)
 
 
-# ==============================================================================
 # Model loaders  (local imports deferred inside cached functions)
-# ==============================================================================
 
 @st.cache_resource(show_spinner=False)
 def load_config():
@@ -705,15 +679,13 @@ def load_schedule_and_transform(_cfg):
     return sch, lt
 
 
-# ==============================================================================
 # INPUT VALIDATION
-# ==============================================================================
 
 def validate_inputs(lat, lon, start_date, end_date):
-    """
-    Returns a list of human-readable error strings.
-    Empty list means all inputs are valid.
-    """
+    # 
+    # Returns a list of human-readable error strings.
+    # Empty list means all inputs are valid.
+    # 
     errors = []
 
     # --- latitude ---
@@ -759,17 +731,14 @@ def validate_inputs(lat, lon, start_date, end_date):
             n = (end_date - start_date).days + 1
             if n > MAX_DAYS:
                 errors.append(
-                    f"Date range spans {n} days - maximum allowed is {MAX_DAYS} days (~2 years). "
+                    f"Date range spans {n} days - maximum allowed is {MAX_DAYS} days (1 years). "
                     "Please shorten the range."
                 )
 
     return errors
 
 
-# ==============================================================================
 # Generation helpers
-# ==============================================================================
-
 def run_generation(lat, lon, start_date, end_date, cfg,
                    vae, denoiser, schedule, lt, ist, dfs, device):
     from solar_diffusion.generate import generate_sequence
@@ -819,10 +788,7 @@ def build_csv(gen, cs_ghi, zenith, dates, cfg):
     return buf.getvalue().encode()
 
 
-# ==============================================================================
 # Matplotlib helpers
-# ==============================================================================
-
 def _ax_style(ax, title="", xlabel="", ylabel=""):
     ax.set_facecolor("none")          # transparent - page bg shows through
     ax.patch.set_visible(False)
@@ -977,9 +943,7 @@ def plot_statistics(stats, cfg):
     return fig
 
 
-# ==============================================================================
 # STARTUP: file existence check + model loading
-# ==============================================================================
 with st.spinner("Loading model weights..."):
     try:
         missing = [p for p in REQUIRED_FILES if not p.exists()]
@@ -1037,9 +1001,9 @@ st.markdown(f"""
 <nav class="solad-nav">
   <a class="brand" href="#about">SOLAD</a>
   <div class="nav-right">
-    <a class="nav-link active" href="#about" data-section="about">About</a>
-    <a class="nav-link" href="#generation" data-section="generation">Generation</a>
-    <a class="nav-link" href="#data" data-section="data">Data</a>
+    <a class="nav-link active" href="#generation" data-section="generation">Generation</a>
+    <a class="nav-link" href="#about" data-section="about">About</a>
+    <a class="nav-link" href="#data" data-section="data">Instalation</a>
     <div class="nav-meta">
       <div class="nav-dot"></div>
       {APP_VERSION}
@@ -1058,13 +1022,13 @@ components.html("""
       a.classList.toggle('active', a.dataset.section === id);
     });
   }
-  var sections = ['about', 'generation', 'data'];
+  var sections = [''generation', about', 'data'];
   var observer = new window.parent.IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
       if (entry.isIntersecting) setActive(entry.target.id);
     });
   }, { rootMargin: '-56px 0px -60% 0px', threshold: 0 });
-  function observe() {
+  function observe() {active
     var found = 0;
     sections.forEach(function(id) {
       var el = window.parent.document.getElementById(id);
@@ -1078,92 +1042,20 @@ components.html("""
 """, height=0)
 
 
-# ==============================================================================
-# SECTION 1 - ABOUT
-# ==============================================================================
-st.markdown('<a class="section-anchor" id="about"></a>', unsafe_allow_html=True)
-
-# -- Two-column About layout: left = text, right = map (top) + table (bottom) --
-col_text, col_right = st.columns([1.2, 1], gap="medium")
-
-with col_text:
-    st.markdown("""
-<div style='
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    height: 100%;
-    padding-right: 0.5rem;
-'>
-  <div id='solad-title' style='font-family:Syne,system-ui,sans-serif;font-size:2.1rem;font-weight:700;line-height:1.2;letter-spacing:-0.01em;padding-top:1.5rem;padding-bottom:0.75rem;'>
-    <span class='amb'>Sol</span>ar
-    <span class='amb'>La</span>tent
-    <span class='amb'>D</span>iffusion Irradiance Timeseries Generator
-  </div>
-  <div class='prose' style='font-size:0.88rem;line-height:1.85;font-family:Courier New,Courier,monospace;text-align:justify;'>
-  Generates 10-mmin realistic synthetic solar irradiance time series at arbitrary locations
-  and date ranges - with no weather data, no sensors, and no observations required
-  at inference time. Coordinates and a date range are the only inputs. 
-  Currently, it generates global irradiance, but it can be extended to include both global and diffuse channels.
-  <br><br>
-  This implementation is a research prototype and is not intended as a
-  production-ready tool. Trained exclusively on 3 years of <strong>SURFRAD</strong> ground measurements from
-  seven stations spanning diverse North American climate regimes. No auxiliary
-  meteorological variables enter the model at any stage — only solar irradiance
-  records and their derived features. This deliberate minimalism isolates the
-  contribution of the architecture and demonstrates that physically realistic
-  sequences can be synthesised from solar measurements alone.
-  <em>The guiding principle: use the minimum to learn, need the minimum to work.</em>
-  <br><br>
-  The model generalises well to held-out sites and years.
-  Generalisation to climatologically distinct or out-of-distribution sites --
-  remote archipelagos, tropical monsoon zones -- is not guaranteed;
-  fine-tuning on a modest set of local ground measurements is recommended.
-  <br><br>  
-  The architecture is designed to be extensible. Conditioning on historical
-  observations, sky imagery, or richer inputs requires only a lightweight addition,
-  naturally extending the model into a forecaster or a prompt-driven generator — 
-  free-text scene descriptions as generation prompts. 
-  Code, weights, and technical details are available in the accompanying GitHub repository and research paper.
-  </div>
+# SECTION 2 - GENERATION
+st.markdown('<a class="section-anchor" id="generation"></a>', unsafe_allow_html=True)
+st.markdown("""
+<a class="section-anchor" id="generation"></a>
+<div id='solad-title' style='font-family:Syne,system-ui,sans-serif;font-size:2.1rem;font-weight:700;line-height:1.2;letter-spacing:-0.01em;padding-top:1.5rem;padding-bottom:0.75rem;'>
+  <span class='amb'>Sol</span>ar
+  <span class='amb'>La</span>tent
+  <span class='amb'>D</span>iffusion — Synthetic Irradiance Generator
 </div>
 """, unsafe_allow_html=True)
 
-with col_right:
-    # -- Map --
-    st.markdown("<div class='sec-rule'>SURFRAD Network</div>", unsafe_allow_html=True)
-    st.markdown("<div class='panel-flush'>", unsafe_allow_html=True)
-    fig_map = make_station_map()
-    st.pyplot(fig_map, use_container_width=True)
-    plt.close(fig_map)
-    st.markdown("</div>", unsafe_allow_html=True)
-    # -- Table --
-    st.markdown("<div class='sec-rule' style='margin-top:1.2rem;'>Training Stations</div>", unsafe_allow_html=True)
-    rows_html = "".join(
-        f"<tr><td>{sid}</td><td>{m['name']}</td>"
-        f"<td>{m['lat']:.3f}&deg;&thinsp;N</td>"
-        f"<td>{m['lon']:.3f}&deg;&thinsp;E</td>"
-        f"<td style='color:var(--mu)'>{m['climate']}</td></tr>"
-        for sid, m in STATION_META.items()
-    )
-    st.markdown(
-        f"<table class='st-table'>"
-        f"<thead><tr><th>ID</th><th>Location</th><th>Lat</th><th>Lon</th><th>Climate</th></tr></thead>"
-        f"<tbody>{rows_html}</tbody></table>",
-        unsafe_allow_html=True,
-    )
-
-st.markdown("<hr class='hdiv'>", unsafe_allow_html=True)
-
-
-# ==============================================================================
-# SECTION 2 - GENERATION
-# ==============================================================================
-st.markdown('<a class="section-anchor" id="generation"></a>', unsafe_allow_html=True)
-st.markdown("<div class='section-title'>Generation</div>", unsafe_allow_html=True)
-
-st.markdown("<div class='ctrl-title'>Parameters</div>", unsafe_allow_html=True)
-st.caption("The model currently generates data at 10-min resolution. Higher resolution requires more training hardware and time")
+# st.markdown("<div class='section-title'>Generation</div>", unsafe_allow_html=True)
+# st.markdown("<div class='ctrl-title'>Parameters</div>", unsafe_allow_html=True)
+st.caption("The model currently generates data at 10-min resolution")
 
 c_lat, c_lon = st.columns([1, 1], gap="medium")
 with c_lat:
@@ -1179,7 +1071,7 @@ with c_s:
     start_date = st.date_input("Start date", value=today,
                                min_value=DATE_MIN, max_value=DATE_MAX)
 with c_e:
-    end_date = st.date_input("End date", value=today + timedelta(days=29),
+    end_date = st.date_input("End date", value=today + timedelta(days=6),
                              min_value=DATE_MIN, max_value=DATE_MAX)
 with c_btn:
     st.markdown("<div style='margin-top:1.55rem;'></div>", unsafe_allow_html=True)
@@ -1321,57 +1213,115 @@ else:
 
 st.markdown("<hr class='hdiv'>", unsafe_allow_html=True)
 
+
+# SECTION 1 - ABOUT
+st.markdown('<a class="section-anchor" id="about"></a>', unsafe_allow_html=True)
+
+with st.expander("About", expanded=False):
+    # -- Two-column About layout: left = text, right = map (top) + table (bottom) --
+    col_text, col_right = st.columns([1.2, 1], gap="medium")
+    with col_text:
+        st.markdown("""
+<div style='
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    height: 100%;
+    padding-right: 0.5rem;
+'>
+  <div <br><br> 
+  </div>
+  <div class='prose' style='font-size:0.88rem;line-height:1.85;font-family:Courier New,Courier,monospace;text-align:justify;'>
+  SOLAD Generates 10-mmin realistic synthetic solar irradiance time series at arbitrary locations
+  and date ranges -- with no weather data, no sensors, and no observations required
+  at inference time. Coordinates and a date range are the only inputs. 
+  Currently, it generates the global irradiance, but it can be extended to include both direct and diffuse channels.
+  <br><br>
+  This implementation is a research prototype and is not intended as a
+  production-ready tool. Trained exclusively on 3 years of <strong>SURFRAD</strong> ground measurements from
+  seven stations spanning diverse North American climate regimes. No auxiliary
+  meteorological variables enter the model at any stage -- only solar irradiance
+  records and their derived features. This deliberate minimalism isolates the
+  contribution of the architecture and demonstrates that physically realistic
+  sequences can be synthesised from solar measurements alone.
+  <br><br>
+  Generalisation to climatologically distinct or out-of-distribution sites --
+  remote archipelagos, tropical monsoon zones -- is not guaranteed;
+  retraining or fine-tuning on a modest set of local ground measurements is recommended.
+  <br><br>  
+  The architecture is designed to be extensible. Conditioning on historical
+  observations, sky imagery, or richer inputs requires only a lightweight addition,
+  naturally extending the model into a forecaster or a prompt-driven generator -- 
+  free-text scene descriptions as generation prompts. 
+  Code, weights, and technical details are available in the accompanying <a href='https://github.com/frimane/SOLAD' title='https://github.com/frimane/SOLAD' style='color:#5b9bd5;text-decoration:none;'>GitHub</a>. 
+  repository and the <a href='#' title='Link will be available upon publication' style='color:#5b9bd5;text-decoration:none;cursor:help;'>research paper</a>.
+  </div>
+</div>
+""", unsafe_allow_html=True) #<em>The guiding principle: use the minimum to learn and need the minimum to work.</em>
+    with col_right:
+        # -- Map --
+        st.markdown("<div class='sec-rule'>SURFRAD Network</div>", unsafe_allow_html=True)
+        st.markdown("<div class='panel-flush'>", unsafe_allow_html=True)
+        fig_map = make_station_map()
+        st.pyplot(fig_map, use_container_width=True)
+        plt.close(fig_map)
+        st.markdown("</div>", unsafe_allow_html=True)
+        # -- Table --
+        st.markdown("<div class='sec-rule' style='margin-top:1.2rem;'>Training Stations</div>", unsafe_allow_html=True)
+        rows_html = "".join(
+            f"<tr><td>{sid}</td><td>{m['name']}</td>"
+            f"<td>{m['lat']:.3f}&deg;&thinsp;N</td>"
+            f"<td>{m['lon']:.3f}&deg;&thinsp;E</td>"
+            f"<td style='color:var(--mu)'>{m['climate']}</td></tr>"
+            for sid, m in STATION_META.items()
+        )
+        st.markdown(
+            f"<table class='st-table'>"
+            f"<thead><tr><th>ID</th><th>Location</th><th>Lat</th><th>Lon</th><th>Climate</th></tr></thead>"
+            f"<tbody>{rows_html}</tbody></table>",
+            unsafe_allow_html=True,
+        )
+
+st.markdown("<hr class='hdiv'>", unsafe_allow_html=True)
  
-# ==============================================================================
-# SECTION 3 - DATA REFERENCE
-# ==============================================================================
+
+# SECTION 3 - INSTALL SOLAD
 st.markdown('<a class="section-anchor" id="data"></a>', unsafe_allow_html=True)
-st.markdown("<div class='section-title'>SURFRAD Data Acquisition</div>", unsafe_allow_html=True)
- 
-with st.expander("Download script", expanded=False):
-    st.code('''\
-import pvlib, pandas as pd, socket, time, os, calendar
- 
-def download_surfrad_year(station_dir, code, year, out_dir="surfrad_data"):
-    days = 366 if calendar.isleap(year) else 365
-    base = f"ftp://aftp.cmdl.noaa.gov/data/radiation/surfrad/{station_dir}/{year}"
-    frames = []
-    for doy in range(1, days + 1):
-        url = f"{base}/{code}{str(year)[2:]}{doy:03d}.dat"
-        for attempt in range(3):
-            try:
-                socket.setdefaulttimeout(60)
-                df, _ = pvlib.iotools.read_surfrad(url, map_variables=True)
-                if not df.empty:
-                    frames.append(df)
-                break
-            except Exception:
-                if attempt < 2:
-                    time.sleep(1)
-        time.sleep(0.1)
-    if not frames:
-        return None
-    result = pd.concat(frames).sort_index()
-    for col in ["ghi", "dni", "dhi"]:
-        if col in result.columns:
-            result = result[(result[col] >= -50) & (result[col] <= 2000)]
-    os.makedirs(os.path.join(out_dir, station_dir), exist_ok=True)
-    path = os.path.join(out_dir, station_dir, f"{station_dir}_{year}.csv")
-    result.to_csv(path)
-    return result
- 
-if __name__ == "__main__":
-    stations = [
-        ("Bondville_IL", "bon"), ("Desert_Rock_NV", "dra"),
-        ("Fort_Peck_MT", "fpk"), ("Goodwin_Creek_MS", "gwn"),
-        ("Penn_State_PA", "psu"), ("Sioux_Falls_SD", "sxf"),
-        ("tbl", "tbl"),
-    ]
-    for station_dir, code in stations:
-        for year in [2020, 2021, 2022, 2023]:
-            download_surfrad_year(station_dir, code, year)
-            time.sleep(2)
-''', language="python")
+st.markdown("<div class='section-title'>Run SOLAD Locally</div>", unsafe_allow_html=True)
+
+st.markdown("""
+<div style='color:#9db4c8; font-size:0.92rem; margin-bottom:1.2rem;'>
+Follow the steps below to install and run SOLAD on your own machine.
+Python&nbsp;3.9 or later is required.
+</div>
+""", unsafe_allow_html=True)
+
+with st.expander("Step 1 — Clone the repository", expanded=False):
+    st.markdown("<div style='color:#9db4c8; margin-bottom:0.5rem;'>Download the source code from GitHub.</div>",
+                unsafe_allow_html=True)
+    st.code("git clone https://github.com/frimane/SOLAD.git\ncd solad", language="bash")
+
+with st.expander("Step 2 — Create a virtual environment", expanded=False):
+    st.markdown("<div style='color:#9db4c8; margin-bottom:0.5rem;'>Isolate dependencies from your system Python.</div>",
+                unsafe_allow_html=True)
+    st.code("""\
+# macOS / Linux
+python -m venv .venv
+source .venv/bin/activate
+
+# Windows
+python -m venv .venv
+.venv\\Scripts\\activate""", language="bash")
+
+with st.expander("Step 3 — Install dependencies", expanded=False):
+    st.markdown("<div style='color:#9db4c8; margin-bottom:0.5rem;'>Install all required packages from the provided requirements file.</div>",
+                unsafe_allow_html=True)
+    st.code("pip install -r requirements.txt", language="bash")
+
+with st.expander("Step 4 — Run the app", expanded=False):
+    st.markdown("<div style='color:#9db4c8; margin-bottom:0.5rem;'>Launch the Streamlit interface. The app will open automatically in your browser.</div>",
+                unsafe_allow_html=True)
+    st.code("streamlit run app.py", language="bash")
  
 st.markdown(
     f"<div class='footer'>"

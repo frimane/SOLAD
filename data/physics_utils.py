@@ -1,21 +1,21 @@
-"""
-data/physics_utils.py
----------------------
-Assembles physics conditioning tensors from profile dicts produced by
-SolarPreprocessor.
 
-ETR strategy (issues #1, #17)
-------------------------------
-ETR is a pure function of DOY — we compute it once per profile using a
-fast vectorised Spencer formula (no pvlib DatetimeIndex call in the hot
-path). The formula requires only integer DOY, so it runs in microseconds.
+# data/physics_utils.py
+# ---------------------
+# Assembles physics conditioning tensors from profile dicts produced by
+# SolarPreprocessor.
 
-Day features (issues #2, #7)
------------------------------
-- Zenith threshold always comes from the caller, never hard-coded.
-- sunrise_hour / sunset_hour expressed as hours-from-solar-noon (signed),
-  not raw UTC hours.  This removes the latitude×timezone confound.
-"""
+# ETR strategy 
+# ------------------------------
+# ETR is a pure function of DOY — we compute it once per profile using a
+# fast vectorised Spencer formula (no pvlib DatetimeIndex call in the hot
+# path). The formula requires only integer DOY, so it runs in microseconds.
+
+# Day features
+# -----------------------------
+# - Zenith threshold always comes from the caller, never hard-coded.
+# - sunrise_hour / sunset_hour expressed as hours-from-solar-noon (signed),
+#   not raw UTC hours.  This removes the latitude×timezone confound.
+
 
 import json
 import logging
@@ -30,7 +30,7 @@ import pvlib  # used only for declination_spencer71 scalar
 
 log = logging.getLogger(__name__)
 
-# ── Column names as written by SolarPreprocessor ────────────────────────────
+# Column names 
 _ZENITH_COL = "solar_zenith_angle"
 _GCS_COL    = "ghi_clear_sky"
 
@@ -45,22 +45,21 @@ _DAY_FEAT_NAMES = [
 ]
 
 
-# ── Fast ETR — pure Spencer formula, no pvlib DatetimeIndex ──────────────────
-
+# Fast ETR
 def _etr_spencer(doy: int, n_steps: int, dt_hours: float, solar_constant: float = 1367.0) -> np.ndarray:
-    """
-    Extraterrestrial radiation for every timestep of a day using Spencer (1971).
+    
+    # Extraterrestrial radiation for every timestep of a day using Spencer (1971).
 
-    Returns (n_steps,) float32 in W/m².
-    Each value is the mean ETR over the timestep interval (midpoint rule),
-    identical to pvlib's get_extra_radiation(method='spencer') behaviour.
+    # Returns (n_steps,) float32 in W/m2.
+    # Each value is the mean ETR over the timestep interval (midpoint rule),
+    # identical to pvlib's get_extra_radiation(method='spencer') behaviour.
 
-    Parameters
-    ----------
-    doy     : day-of-year (1–365)
-    n_steps : number of timesteps in the day (e.g. 144 for 10-min)
-    dt_hours: timestep width in hours (e.g. 1/6 for 10-min)
-    """
+    # Parameters
+    # ----------
+    # doy     : day-of-year (1–365)
+    # n_steps : number of timesteps in the day (e.g. 144 for 10-min)
+    # dt_hours: timestep width in hours (e.g. 1/6 for 10-min)
+    
     B = (2 * math.pi / 365) * (doy - 1)
     E0 = 1.000110 + 0.034221 * math.cos(B) + 0.001280 * math.sin(B) \
        + 0.000719 * math.cos(2 * B) + 0.000077 * math.sin(2 * B)
@@ -73,17 +72,16 @@ def _dt_hours_from_profile(profile: Dict) -> float:
     return (ts[1] - ts[0]).total_seconds() / 3600.0
 
 
-# ── 1. Intra-day physics matrix ──────────────────────────────────────────────
+#Intra-day physics matrix
 
 def extract_intraday_matrix(profile: Dict) -> np.ndarray:
-    """
-    Assemble the (T, 3) intra-day physics matrix.
+    
+    # Assemble the (T, 3) intra-day physics matrix.
 
-    Columns : [solar_zenith_angle, ETR, ghi_clear_sky]
+    # Columns : [solar_zenith_angle, ETR, ghi_clear_sky]
 
-    ETR is computed via the fast Spencer formula — no pvlib DatetimeIndex
-    call, no network/IO, runs in ~5 µs regardless of T.
-    """
+    # ETR is computed via the fast Spencer formula - no pvlib DatetimeIndex
+    
     geo = profile["deterministic_geometry"]
     try:
         zenith = np.array(geo[_ZENITH_COL], dtype=np.float32)
@@ -102,11 +100,10 @@ def extract_intraday_matrix(profile: Dict) -> np.ndarray:
     return np.stack([zenith, etr, gcs], axis=1)  # (T, 3)
 
 
-# ── 2. Sunlit mask ────────────────────────────────────────────────────────────
-
+# Sunlit mask 
 def extract_sunlit_mask(
     profile: Dict,
-    zenith_threshold: float,   # always explicit — no default to avoid inconsistency
+    zenith_threshold: float,   # always explicit - no default to avoid inconsistency
 ) -> np.ndarray:
     """Boolean mask (T,) — True where solar zenith < threshold."""
     zenith = np.array(
@@ -115,32 +112,31 @@ def extract_sunlit_mask(
     return zenith < zenith_threshold
 
 
-# ── 3. Day-level scalar features ─────────────────────────────────────────────
-
+# Day-level scalar features
 def extract_day_features(
     profile: Dict,
     zenith_threshold: float,   # same value used for sunlit mask
 ) -> np.ndarray:
-    """
-    Compute the 7-dim day-level scalar conditioning vector.
+    
+    # Compute the 7-dim day-level scalar conditioning vector.
 
-    Features
-    --------
-    0  declination           solar declination [degrees] — Spencer eq.
-    1  doy_sin               sin(2π·DOY/365)
-    2  doy_cos               cos(2π·DOY/365)
-    3  sunrise_from_noon     hours from solar noon to sunrise (negative)
-    4  sunset_from_noon      hours from solar noon to sunset (positive)
-    5  day_length_hours      total sunlit duration
+    # Features
+    # --------
+    # 0  declination           solar declination [degrees] — Spencer eq.
+    # 1  doy_sin               sin(2π·DOY/365)
+    # 2  doy_cos               cos(2π·DOY/365)
+    # 3  sunrise_from_noon     hours from solar noon to sunrise (negative)
+    # 4  sunset_from_noon      hours from solar noon to sunset (positive)
+    # 5  day_length_hours      total sunlit duration
 
-    TOA daily irradiation removed — it is a deterministic function of DOY
-    and latitude, both already encoded via doy_sin/cos and sunrise/sunset.
-    Its log z-score std was 0.024 causing z-scores of ±20, dominating gradients.
+    # TOA daily irradiation removed — it is a deterministic function of DOY
+    # and latitude, both already encoded via doy_sin/cos and sunrise/sunset.
+    # Its log z-score std was 0.024 causing z-scores of ±20, dominating gradients.
 
-    Sunrise/sunset are expressed relative to solar noon so the feature
-    is independent of UTC timezone offset (fixes audit issue #7).
-    Zenith threshold matches the mask used everywhere else (fixes issue #2).
-    """
+    # Sunrise/sunset are expressed relative to solar noon so the feature
+    # is independent of UTC timezone offset
+    # Zenith threshold matches the mask used everywhere else 
+    
     geo      = profile["deterministic_geometry"]
     date_str = profile["date"]
 
@@ -150,7 +146,7 @@ def extract_day_features(
     doy_cos = float(np.cos(2 * math.pi * doy / 365.0))
     declination = float(pvlib.solarposition.declination_spencer71(doy))
 
-    # ── Derive sunrise/sunset relative to solar noon ──────────────────────────
+    # Derive sunrise/sunset relative to solar noon 
     # P3-FIX: all time arithmetic is done in UTC fractional hours throughout.
     # profile["solar_noon"] is an ISO string that may be tz-aware (UTC) or
     # tz-naive.  We strip tz information and treat everything as UTC wall-clock
@@ -168,17 +164,17 @@ def extract_day_features(
     # Solar noon: stored as ISO string in profile root
     noon_str = profile.get("solar_noon", None)
 
-    # P3-FIX continued: sunlit_times is also tz-naive — subtraction is safe.
-    # BUGFIX: do NOT use .hour/.minute on sunlit_times — for western-US stations
+    # P3-FIX continued: sunlit_times is also tz-naive - subtraction is safe.
+    # BUGFIX: do NOT use .hour/.minute on sunlit_times - for western-US stations
     # (UTC-6 to UTC-7) sunset falls after UTC midnight (00:00–01:30 of the next
     # calendar day), so .hour returns 0 or 1 instead of ~24, making
     # sunset_from_noon hugely negative (observed mean≈-5.78 instead of +5.5).
     # Fix: express all times as fractional hours elapsed since timestamps[0],
     # which is always within the local solar day regardless of UTC offset.
-    t0 = timestamps[0]   # reference epoch — first sample of the day window
+    t0 = timestamps[0]   # reference epoch - first sample of the day window
 
     def _frac_hours(ts: pd.Timestamp) -> float:
-        """Fractional hours elapsed since t0 (monotonically increasing, no wrap)."""
+    # Fractional hours elapsed since t0 (monotonically increasing, no wrap)
         return (ts - t0).total_seconds() / 3600.0
 
     # Recompute noon_hour in the same elapsed-hours frame
@@ -225,8 +221,7 @@ def extract_day_features(
     return result
 
 
-# ── 4. Location features ──────────────────────────────────────────────────────
-
+# Location features 
 def extract_location_features(lat: float, lon: float) -> np.ndarray:
     """Encode lat/lon as (4,) sin/cos vector."""
     lat_r = np.deg2rad(lat)
@@ -237,16 +232,15 @@ def extract_location_features(lat: float, lon: float) -> np.ndarray:
     ], dtype=np.float32)
 
 
-# ── 4b. Climate features from kgcpy ──────────────────────────────────────────
-#
+# Climate features from kgcpy
 # Enriches the denoiser's day-level conditioning with climatological context
 # that pvlib solar geometry alone cannot provide.  Computed entirely from
-# lat/lon via kgcpy — no historical observations needed — so available at
+# lat/lon via kgcpy - no historical observations needed - so available at
 # inference time for any arbitrary location.
 #
 # kgcpy (pip install kgcpy) provides:
-#   kgcpy.lookupCZ(lat, lon)          → Köppen zone string e.g. "Cfa", "BWh"
-#   kgcpy.irradianceQuantile(zone)    → (p98, p80, p50, p30) tuple [Wh/m²/year]
+#   kgcpy.lookupCZ(lat, lon)          -> Köppen zone string e.g. "Cfa", "BWh"
+#   kgcpy.irradianceQuantile(zone)    -> (p98, p80, p50, p30) tuple [Wh/m²/year]
 #
 # Feature vector (10 dims):
 #   0-5   Köppen one-hot: tropical(A), arid(B), temperate(C),
@@ -274,7 +268,7 @@ N_CLIMATE_FEATURES = _N_KOPPEN_CLASSES + _N_IRR_QUANTILES   # 10
 
 
 def _koppen_to_onehot(zone_str: str) -> np.ndarray:
-    """Map Köppen zone string (e.g. 'Cfb') to (_N_KOPPEN_CLASSES,) one-hot."""
+    # Map Köppen zone string (e.g. 'Cfb') to (_N_KOPPEN_CLASSES,) one-hot
     vec = np.zeros(_N_KOPPEN_CLASSES, dtype=np.float32)
     if zone_str and len(zone_str) >= 1:
         idx = _KOPPEN_MAIN_GROUPS.get(zone_str[0].upper(), _N_KOPPEN_CLASSES - 1)
@@ -285,21 +279,19 @@ def _koppen_to_onehot(zone_str: str) -> np.ndarray:
 
 
 def extract_climate_features(lat: float, lon: float) -> np.ndarray:
-    """Compute (N_CLIMATE_FEATURES=10,) climate vector from lat/lon alone.
+    # Compute (N_CLIMATE_FEATURES=10,) climate vector from lat/lon alone.
 
-    Features
-    --------
-    0-5   Köppen one-hot (tropical, arid, temperate, continental, polar, other)
-    6-9   Irradiance quantiles (p30, p50, p80, p98) in Wh/m²/year
-          from kgcpy.irradianceQuantile — per-zone annual GHI statistics
-          fitted on real historical irradiance data globally.
+    # Features
+    # --------
+    # 0-5   Köppen one-hot (tropical, arid, temperate, continental, polar, other)
+    # 6-9   Irradiance quantiles (p30, p50, p80, p98) in Wh/m2/year
+    #       from kgcpy.irradianceQuantile -per-zone annual GHI statistics
+    #       fitted on real historical irradiance data globally.
 
-    Falls back to zeros with a warning if kgcpy is not installed.
-    The model trains correctly without climate features; the denoiser will
-    learn climate conditioning only when kgcpy is available.
-
-    Install: pip install kgcpy
-    """
+    # Falls back to zeros with a warning if kgcpy is not installed.
+    # The model trains correctly without climate features; the denoiser will
+    # learn climate conditioning only when kgcpy is available.
+    
     koppen_vec = np.zeros(_N_KOPPEN_CLASSES, dtype=np.float32)
     irr_q      = np.zeros(_N_IRR_QUANTILES,  dtype=np.float32)
     zone_str   = "unknown"
@@ -407,12 +399,12 @@ class DayFeatureNormStats(_NormStats):
 
 
 class ClimateFeatNormStats(_NormStats):
-    """Normalisation stats for the N_CLIMATE_FEATURES-dim climate feature vector.
+    #Normalisation stats for the N_CLIMATE_FEATURES-dim climate feature vector.
 
-    Köppen one-hot dims (0 to _N_KOPPEN_CLASSES-1) are binary — passed through
-    unchanged as {0,1}.  Only the irradiance quantile dims are z-scored.
-    Mirrors the ObsPhysNormStats binary/continuous split pattern.
-    """
+    # Köppen one-hot dims (0 to _N_KOPPEN_CLASSES-1) are binary - passed through
+    # unchanged as {0,1}.  Only the irradiance quantile dims are z-scored.
+    # Mirrors the ObsPhysNormStats binary/continuous split pattern.
+    # 
 
     def __init__(self):
         super().__init__()
@@ -429,7 +421,7 @@ class ClimateFeatNormStats(_NormStats):
             self.std_    = np.ones(_N_IRR_QUANTILES,  dtype=np.float32)
             self._fitted = True
             return
-        # Each array is (1, N_CLIMATE_FEATURES) — slice irradiance dims
+        # Each array is (1, N_CLIMATE_FEATURES) - slice irradiance dims
         continuous = [a[..., _N_KOPPEN_CLASSES:] for a in arrays]
         data = np.concatenate(continuous, axis=0).reshape(-1, _N_IRR_QUANTILES)
         self.mean_ = data.mean(axis=0).astype(np.float32)
@@ -442,15 +434,15 @@ class ClimateFeatNormStats(_NormStats):
         )
 
     def normalize(self, arr: np.ndarray) -> np.ndarray:
-        """Z-score irradiance quantile dims; pass through Köppen one-hot unchanged.
+        # Z-score irradiance quantile dims; pass through Köppen one-hot unchanged.
 
-        After z-scoring, irradiance quantile dims are soft-clamped to [-3, +3].
-        This prevents out-of-distribution locations (e.g. desert or polar sites
-        not seen during training) from producing extreme feature values that the
-        denoiser has never encountered. 3-sigma covers 99.7% of the training
-        distribution — values beyond are gently clamped rather than extrapolating.
-        Köppen one-hot dims (0-5) are already {0,1} and need no clamping.
-        """
+        # After z-scoring, irradiance quantile dims are soft-clamped to [-3, +3].
+        # This prevents out-of-distribution locations (e.g. desert or polar sites
+        # not seen during training) from producing extreme feature values that the
+        # denoiser has never encountered. 3-sigma covers 99.7% of the training
+        # distribution — values beyond are gently clamped rather than extrapolating.
+        # Köppen one-hot dims (0-5) are already {0,1} and need no clamping.
+        # 
         self._check()
         out = arr.astype(np.float32).copy()
         # Z-score irradiance quantile dims
@@ -482,7 +474,7 @@ class ClimateFeatNormStats(_NormStats):
         self._fitted = True
         log.info("ClimateFeatNormStats loaded ← %s", path)
 
-# Maps profile dict key → human-readable name (used for logging only).
+# Maps profile dict key -> human-readable name (used for logging only).
 # Top-level profile keys (measurements) + derived_features sub-dict keys
 # (computed by SolarFeatureEngineer in preprocessing).
 _OBS_CHANNEL_PROFILE_KEYS: Dict[str, str] = {
@@ -539,8 +531,7 @@ _OBS_CHANNEL_PROFILE_KEYS: Dict[str, str] = {
 }
 
 
-# ── Per-channel pre-transforms applied BEFORE z-score normalisation ──────────
-#
+# Per-channel pre-transforms applied BEFORE z-score normalisation 
 # Problem: ObsPhysNormStats uses z-score (subtract mean, divide by std).
 # This works well for symmetric, unimodal distributions but BREAKS for:
 #
@@ -623,47 +614,47 @@ _OBS_PRETRANSFORM: Dict[str, str] = {
 
 
 def is_obs_channel_binary(name: str) -> bool:
-    """Return True if channel 'name' is a binary {0,1} flag that must NOT be z-scored."""
+    #Return True if channel 'name' is a binary {0,1} flag that must NOT be z-scored
     return _OBS_PRETRANSFORM.get(name, "identity") == "binary"
 
 
 def obs_binary_mask(obs_channel_names: List[str]) -> np.ndarray:
-    """
-    Boolean array of shape (N_obs,) — True where the channel is binary.
+    # 
+    # Boolean array of shape (N_obs,) — True where the channel is binary.
 
-    Used in dataset.py and fit_all_norm_stats to exclude binary columns
-    from z-score fitting and application.
+    # Used in dataset.py and fit_all_norm_stats to exclude binary columns
+    # from z-score fitting and application.
 
-    Example
-    -------
-    mask = obs_binary_mask(cfg["vae"]["obs_channels"])
-    # fit only on non-binary columns:
-    stats.fit(obs_arrays[:, ~mask])
-    # apply z-score only to non-binary columns:
-    obs_norm[:, ~mask] = stats.normalize(obs_raw[:, ~mask])
-    # binary columns stay as {0,1}:
-    obs_norm[:, mask] = obs_raw[:, mask]
-    """
+    # Example
+    # -------
+    # mask = obs_binary_mask(cfg["vae"]["obs_channels"])
+    # # fit only on non-binary columns:
+    # stats.fit(obs_arrays[:, ~mask])
+    # # apply z-score only to non-binary columns:
+    # obs_norm[:, ~mask] = stats.normalize(obs_raw[:, ~mask])
+    # # binary columns stay as {0,1}:
+    # obs_norm[:, mask] = obs_raw[:, mask]
+    # 
     return np.array([is_obs_channel_binary(n) for n in obs_channel_names], dtype=bool)
 
 
 def _apply_obs_pretransform(arr: np.ndarray, name: str) -> np.ndarray:
-    """
-    Apply per-channel pre-transform to a 1-D sunlit slice BEFORE z-score.
+    # 
+    # Apply per-channel pre-transform to a 1-D sunlit slice BEFORE z-score.
 
-    Called inside extract_obs_matrix for each column individually.
-    After this transform, the column is ready for ObsPhysNormStats.fit()
-    and .normalize() — except binary channels which bypass z-score entirely.
+    # Called inside extract_obs_matrix for each column individually.
+    # After this transform, the column is ready for ObsPhysNormStats.fit()
+    # and .normalize() — except binary channels which bypass z-score entirely.
 
-    Parameters
-    ----------
-    arr  : (T_sun,) raw float32 values for one channel
-    name : channel name — looked up in _OBS_PRETRANSFORM
+    # Parameters
+    # ----------
+    # arr  : (T_sun,) raw float32 values for one channel
+    # name : channel name — looked up in _OBS_PRETRANSFORM
 
-    Returns
-    -------
-    (T_sun,) float32 transformed values
-    """
+    # Returns
+    # -------
+    # (T_sun,) float32 transformed values
+    # 
     mode = _OBS_PRETRANSFORM.get(name, "identity")
     arr  = arr.astype(np.float32)
     if mode == "log1p":
@@ -680,48 +671,48 @@ def extract_obs_matrix(
     obs_channel_names: List[str],
     zenith_threshold: float,
 ) -> np.ndarray:
-    """
-    Assemble the (T_sun, N_obs) observation matrix from a profile dict.
+    # 
+    # Assemble the (T_sun, N_obs) observation matrix from a profile dict.
 
-    These channels are derived from REAL MEASUREMENTS or from
-    SolarFeatureEngineer (stored in profile["derived_features"]).
-    They are only available during training (when actual irradiance data
-    exists).  At generation time this function is never called — the
-    encoder is never invoked; diffusion directly samples z in τ-space.
+    # These channels are derived from REAL MEASUREMENTS or from
+    # SolarFeatureEngineer (stored in profile["derived_features"]).
+    # They are only available during training (when actual irradiance data
+    # exists).  At generation time this function is never called — the
+    # encoder is never invoked; diffusion directly samples z in τ-space.
 
-    Lookup order for each channel name
-    -----------------------------------
-    1. profile[name]                      — top-level keys (diffuse_fraction,
-                                            air_mass, dni, ...)
-    2. profile["derived_features"][name]  — SolarFeatureEngineer output
-                                            (csi_variability_w3, ghi_trend_w5, ...)
-    3. Missing → fill 0.0 + log warning
+    # Lookup order for each channel name
+    # -----------------------------------
+    # 1. profile[name]                      — top-level keys (diffuse_fraction,
+    #                                         air_mass, dni, ...)
+    # 2. profile["derived_features"][name]  — SolarFeatureEngineer output
+    #                                         (csi_variability_w3, ghi_trend_w5, ...)
+    # 3. Missing → fill 0.0 + log warning
 
-    Pre-transform
-    -------------
-    Each channel is passed through _apply_obs_pretransform() before being
-    stored.  This applies log1p to heavy-skewed channels and is a no-op for
-    well-behaved and binary channels.  See _OBS_PRETRANSFORM for the full
-    per-channel policy.
+    # Pre-transform
+    # -------------
+    # Each channel is passed through _apply_obs_pretransform() before being
+    # stored.  This applies log1p to heavy-skewed channels and is a no-op for
+    # well-behaved and binary channels.  See _OBS_PRETRANSFORM for the full
+    # per-channel policy.
 
-    Binary channels ({0,1} event flags) are stored as-is here.
-    The caller (dataset.py / fit_all_norm_stats) must use obs_binary_mask()
-    to exclude them from z-score fitting and application.
+    # Binary channels ({0,1} event flags) are stored as-is here.
+    # The caller (dataset.py / fit_all_norm_stats) must use obs_binary_mask()
+    # to exclude them from z-score fitting and application.
 
-    Parameters
-    ----------
-    profile            : profile dict produced by SolarPreprocessor
-    obs_channel_names  : ordered list of channel names — from cfg["vae"]["obs_channels"]
-    zenith_threshold   : same value used everywhere else for the sunlit mask
+    # Parameters
+    # ----------
+    # profile            : profile dict produced by SolarPreprocessor
+    # obs_channel_names  : ordered list of channel names — from cfg["vae"]["obs_channels"]
+    # zenith_threshold   : same value used everywhere else for the sunlit mask
 
-    Returns
-    -------
-    obs : (T_sun, N_obs) float32 — only sunlit timesteps, pre-transformed,
-          same order as obs_channel_names.
-          Binary columns are {0,1}; continuous columns are pretransformed.
-          Z-score normalisation is applied DOWNSTREAM by ObsPhysNormStats
-          on NON-BINARY columns only.
-    """
+    # Returns
+    # -------
+    # obs : (T_sun, N_obs) float32 — only sunlit timesteps, pre-transformed,
+    #       same order as obs_channel_names.
+    #       Binary columns are {0,1}; continuous columns are pretransformed.
+    #       Z-score normalisation is applied DOWNSTREAM by ObsPhysNormStats
+    #       on NON-BINARY columns only.
+    # 
     zenith = np.array(
         profile["deterministic_geometry"][_ZENITH_COL], dtype=np.float32
     )
@@ -752,19 +743,19 @@ def extract_obs_matrix(
 
 
 class ObsPhysNormStats(_NormStats):
-    """
-    Normalisation statistics for the observation-channel matrix.
+    # 
+    # Normalisation statistics for the observation-channel matrix.
 
-    Fitted on training profiles only, identical API to IntraDayNormStats.
-    Saved/loaded from cfg["paths"]["norm_stats_obs_phys"].
+    # Fitted on training profiles only, identical API to IntraDayNormStats.
+    # Saved/loaded from cfg["paths"]["norm_stats_obs_phys"].
 
-    Extends _NormStats.save/load to also persist binary_mask and
-    obs_channel_names, which are set dynamically after fit() in
-    fit_all_norm_stats().  Without persisting these, load() returns an
-    object missing binary_mask, so dataset.py falls into the else-branch
-    and passes the full (T_sun, N_obs) array to normalize() whose
-    mean_/std_ have shape (N_continuous,) — a broadcast error at runtime.
-    """
+    # Extends _NormStats.save/load to also persist binary_mask and
+    # obs_channel_names, which are set dynamically after fit() in
+    # fit_all_norm_stats().  Without persisting these, load() returns an
+    # object missing binary_mask, so dataset.py falls into the else-branch
+    # and passes the full (T_sun, N_obs) array to normalize() whose
+    # mean_/std_ have shape (N_continuous,) — a broadcast error at runtime.
+    # 
 
     def __init__(self):
         super().__init__()
@@ -805,19 +796,18 @@ class ObsPhysNormStats(_NormStats):
         log.info("NormStats loaded ← %s", path)
 
 
-# ── 6. Fit both stats from a list of profiles ─────────────────────────────────
-
+# 6. Fit both stats from a list of profiles 
 def fit_all_norm_stats_from_cfg(
     profiles: List[Dict],
     cfg: Dict,
 ) -> tuple:
-    """Convenience wrapper: reads all parameters from cfg and calls fit_all_norm_stats.
+    # Convenience wrapper: reads all parameters from cfg and calls fit_all_norm_stats.
 
-    This is the recommended call site in main.py — all thresholds and channel
-    names are read from config automatically.
+    # This is the recommended call site in main.py — all thresholds and channel
+    # names are read from config automatically.
 
-    Returns (intraday_stats, day_feat_stats, obs_stats, climate_stats).
-    """
+    # Returns (intraday_stats, day_feat_stats, obs_stats, climate_stats).
+    # 
     return fit_all_norm_stats(
         profiles=profiles,
         zenith_threshold=cfg["data"]["zenith_threshold_deg"],
@@ -832,19 +822,19 @@ def fit_all_norm_stats(
     subsample: int = 1,
     obs_channel_names: Optional[List[str]] = None,
 ) -> Tuple["IntraDayNormStats", "DayFeatureNormStats", Optional["ObsPhysNormStats"], "ClimateFeatNormStats"]:
-    """
-    Fit all normalisation objects from a list of profile dicts.
+    # 
+    # Fit all normalisation objects from a list of profile dicts.
 
-    Returns
-    -------
-    intraday_stats : IntraDayNormStats   — for (zenith, ETR, GCS) sequences
-    day_feat_stats : DayFeatureNormStats — for 7-dim solar day-level features
-    obs_stats      : ObsPhysNormStats | None
-    climate_stats  : ClimateFeatNormStats — for N_CLIMATE_FEATURES=10-dim climate features
-                     (Köppen one-hot + irradiance quantiles from kgcpy)
+    # Returns
+    # -------
+    # intraday_stats : IntraDayNormStats   — for (zenith, ETR, GCS) sequences
+    # day_feat_stats : DayFeatureNormStats — for 7-dim solar day-level features
+    # obs_stats      : ObsPhysNormStats | None
+    # climate_stats  : ClimateFeatNormStats — for N_CLIMATE_FEATURES=10-dim climate features
+    #                  (Köppen one-hot + irradiance quantiles from kgcpy)
 
-    Fitted on training profiles only — never val/test.
-    """
+    # Fitted on training profiles only — never val/test.
+    # 
     obs_channel_names = obs_channel_names or []
 
     log.info(

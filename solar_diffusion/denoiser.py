@@ -1,27 +1,26 @@
-"""
-solar_diffusion/denoiser.py
------------------------------
-Stage 2: Transformer denoiser for the τ-space latent diffusion model.
+# solar_diffusion/denoiser.py
+# --------------------------------------
+# Stage 2: Transformer denoiser for the τ-space latent diffusion model.
 
-Each of W day-tokens is formed by summing:
-  - Linear(d_z → d_model) projection of the noisy τ latent
-  - Learned positional embedding (W positions)
-  - Sinusoidal diffusion-step embedding (→ 2-layer MLP)
-  - PhysicsEmbedding: MLP([day_features + location]) → d_model
+# Each of W day-tokens is formed by summing:
+#   - Linear(d_z → d_model) projection of the noisy τ latent
+#   - Learned positional embedding (W positions)
+#   - Sinusoidal diffusion-step embedding (→ 2-layer MLP)
+#   - PhysicsEmbedding: MLP([day_features + location]) → d_model
 
-Transformer blocks (pre-norm, n_layers):
-  self-attention across W tokens → cross-attention to intraday physics → FFN
+# Transformer blocks (pre-norm, n_layers):
+#   self-attention across W tokens → cross-attention to intraday physics → FFN
 
-Regime conditioning:
-  4 real regime labels (0=clear, 1=mixed-clear, 2=mixed-overcast, 3=overcast)
-  plus 1 null token (index 4) used during CFG unconditional passes.
-  Projection is zero-initialised so it has no effect at initialisation.
-  n_regimes is read from cfg["diffusion"]["n_regimes"]; the null token index
-  is always n_regimes (one beyond the last real class).
+# Regime conditioning:
+#   4 real regime labels (0=clear, 1=mixed-clear, 2=mixed-overcast, 3=overcast)
+#   plus 1 null token (index 4) used during CFG unconditional passes.
+#   Projection is zero-initialised so it has no effect at initialisation.
+#   n_regimes is read from cfg["diffusion"]["n_regimes"]; the null token index
+#   is always n_regimes (one beyond the last real class).
 
-Classifier-free guidance (CFG):
-  v_guided = v_uncond + guidance_scale × (v_cond − v_uncond)
-"""
+# Classifier-free guidance (CFG):
+#   v_guided = v_uncond + guidance_scale × (v_cond − v_uncond)
+
 
 import math
 from typing import Dict, Optional, Tuple
@@ -31,12 +30,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Sinusoidal diffusion-step embedding
-# ─────────────────────────────────────────────────────────────────────────────
 
 class DiffusionStepEmbedding(nn.Module):
-    """Sinusoidal step embedding k → R^{d_model}, followed by 2-layer MLP."""
+    # Sinusoidal step embedding k -> R^{d_model}, followed by 2-layer MLP
 
     def __init__(self, d_model: int):
         super().__init__()
@@ -77,19 +74,19 @@ class DiffusionStepEmbedding(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PhysicsEmbedding(nn.Module):
-    """MLP([day_features | location]) → (B, W, d_model) conditioning embedding.
+    # MLP([day_features | location]) → (B, W, d_model) conditioning embedding.
 
-    Output dimension is diffusion.d_model, not vae.latent_dim.  The two are
-    independent hyper-parameters: coupling them caused a silent constraint
-    (changing latent_dim silently changed the physics embedding width) and
-    required a redundant phys_proj Linear in SolarDenoiser.
-    """
+    # Output dimension is diffusion.d_model, not vae.latent_dim.  The two are
+    # independent hyper-parameters: coupling them caused a silent constraint
+    # (changing latent_dim silently changed the physics embedding width) and
+    # required a redundant phys_proj Linear in SolarDenoiser.
+    # 
 
     def __init__(self, cfg: Dict):
         super().__init__()
         dc    = cfg["diffusion"]
         in_d  = dc["day_feat_dim"] + dc["loc_feat_dim"]
-        out_d = dc["d_model"]          # was: cfg["vae"]["latent_dim"] — wrong coupling
+        out_d = dc["d_model"]          # 
         hid   = dc["physics_embed_dim"]
 
         self.mlp = nn.Sequential(
@@ -123,18 +120,18 @@ class PhysicsEmbedding(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RegimeEmbedding(nn.Module):
-    """Learnable embedding for GMM-derived 4-class regime labels.
+    # Learnable embedding for GMM-derived 4-class regime labels.
 
-    Vocab: 0=clear, 1=mixed-clear, 2=mixed-overcast, 3=overcast, n_regimes=null.
-    The null token (index n_regimes) replaces all real labels during CFG
-    unconditional passes.
+    # Vocab: 0=clear, 1=mixed-clear, 2=mixed-overcast, 3=overcast, n_regimes=null.
+    # The null token (index n_regimes) replaces all real labels during CFG
+    # unconditional passes.
 
-    n_regimes is read from cfg["diffusion"]["n_regimes"] (default 4). The
-    embedding table size is n_regimes + 1 (one null token appended at the end).
+    # n_regimes is read from cfg["diffusion"]["n_regimes"] (default 4). The
+    # embedding table size is n_regimes + 1 (one null token appended at the end).
 
-    The projection is zero-initialised so the module has no effect at
-    initialisation — the denoiser gradually learns to use regime information.
-    """
+    # The projection is zero-initialised so the module has no effect at
+    # initialisation — the denoiser gradually learns to use regime information.
+    # 
 
     def __init__(self, cfg: Dict):
         super().__init__()
@@ -169,29 +166,29 @@ class RegimeEmbedding(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SiteContextEmbedding(nn.Module):
-    """MLP(location + climate_features) → (B, 1, d_model) window-level bias.
+    # MLP(location + climate_features) → (B, 1, d_model) window-level bias.
 
-    Unlike PhysicsEmbedding which operates per-day, this module encodes the
-    site's climatological identity once per window and adds it as a constant
-    bias across all W day-tokens. This gives the Transformer's self-attention
-    a site-specific context that modulates how much inter-day correlation it
-    learns — arid sites (high irradiance quantiles) should show high clear-sky
-    persistence; marine temperate sites (low quantiles, Cfb) show lower
-    persistence. Without this, the model learns a pooled average ACF across
-    all training stations.
+    # Unlike PhysicsEmbedding which operates per-day, this module encodes the
+    # site's climatological identity once per window and adds it as a constant
+    # bias across all W day-tokens. This gives the Transformer's self-attention
+    # a site-specific context that modulates how much inter-day correlation it
+    # learns — arid sites (high irradiance quantiles) should show high clear-sky
+    # persistence; marine temperate sites (low quantiles, Cfb) show lower
+    # persistence. Without this, the model learns a pooled average ACF across
+    # all training stations.
 
-    Input: [location (4) | climate_features (N_CLIMATE_FEATURES=10)] = 14 dims.
-    The climate slice is extracted from day_features[:, 0, solar_day_feat_dim:]
-    since climate features are constant across all days in a window.
+    # Input: [location (4) | climate_features (N_CLIMATE_FEATURES=10)] = 14 dims.
+    # The climate slice is extracted from day_features[:, 0, solar_day_feat_dim:]
+    # since climate features are constant across all days in a window.
 
-    Zero-initialised output projection so the module has no effect at init —
-    the denoiser learns to use site context gradually during training.
+    # Zero-initialised output projection so the module has no effect at init —
+    # the denoiser learns to use site context gradually during training.
 
-    Config keys read:
-        diffusion.site_embed_dim      (default 64)
-        diffusion.solar_day_feat_dim  (default 7 — pure solar dims before climate)
-        diffusion.loc_feat_dim        (default 4)
-    """
+    # Config keys read:
+    #     diffusion.site_embed_dim      (default 64)
+    #     diffusion.solar_day_feat_dim  (default 7 — pure solar dims before climate)
+    #     diffusion.loc_feat_dim        (default 4)
+    # 
 
     def __init__(self, cfg: Dict):
         super().__init__()
@@ -240,7 +237,7 @@ class SiteContextEmbedding(nn.Module):
         return out
 
 class IntraDayPhysicsProjector(nn.Module):
-    """Project intraday physics (B, W, T_max, 3) → (B, W, T_max, d_model)."""
+    # Project intraday physics (B, W, T_max, 3) → (B, W, T_max, d_model)
 
     def __init__(self, cfg: Dict):
         super().__init__()
@@ -256,9 +253,7 @@ class IntraDayPhysicsProjector(nn.Module):
         return self.proj(intraday_phys)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Transformer block (pre-norm, self + cross attention)
-# ─────────────────────────────────────────────────────────────────────────────
 
 class _TransformerBlock(nn.Module):
     """Pre-norm block: self-attn (W day tokens) → cross-attn (intraday physics) → FFN."""
@@ -311,40 +306,39 @@ class _TransformerBlock(nn.Module):
         return x
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Full Denoiser
-# ─────────────────────────────────────────────────────────────────────────────
 
 class SolarDenoiser(nn.Module):
-    """Transformer denoiser for τ-space latent diffusion.
+    # Transformer denoiser for τ-space latent diffusion.
 
-    forward() inputs:
-        tau_k         : (B, W, d_z_full)   where d_z_full = vae.latent_dim + vae.z_var_dim
-        k             : (B,) or (B, W) diffusion step index
-        day_features  : (B, W, day_feat_dim)
-        location      : (B, loc_feat_dim)
-        intraday_phys : (B, W, T_max, 3)
-        valid_mask    : (B, W, T_max) bool
-        drop_mask     : (B,) bool — True = drop physics conditioning (CFG)
-        regime_ids    : (B, W) int64 — optional 4-class regime labels
+    # forward() inputs:
+    #     tau_k         : (B, W, d_z_full)   where d_z_full = vae.latent_dim + vae.z_var_dim
+    #     k             : (B,) or (B, W) diffusion step index
+    #     day_features  : (B, W, day_feat_dim)
+    #     location      : (B, loc_feat_dim)
+    #     intraday_phys : (B, W, T_max, 3)
+    #     valid_mask    : (B, W, T_max) bool
+    #     drop_mask     : (B,) bool — True = drop physics conditioning (CFG)
+    #     regime_ids    : (B, W) int64 — optional 4-class regime labels
 
-    forward() output: v_pred (B, W, d_z_full)
+    # forward() output: v_pred (B, W, d_z_full)
 
-    The denoiser operates entirely in the full latent space (z_flat ‖ z_var).
-    It has no knowledge of the d_z / z_var_dim split — that split is only
-    relevant to the VAE decoder, which slices z_flat = z_full[:, :d_z] itself.
+    # The denoiser operates entirely in the full latent space (z_flat ‖ z_var).
+    # It has no knowledge of the d_z / z_var_dim split — that split is only
+    # relevant to the VAE decoder, which slices z_flat = z_full[:, :d_z] itself.
 
-    Site context embedding (SiteContextEmbedding):
-        A window-level bias derived from location + climate features, added
-        once to all W day-tokens before the Transformer blocks. This encodes
-        site-specific persistence structure (e.g. arid sites have higher
-        clear-sky ACF than marine temperate sites). Without this, the model
-        learns a pooled average ACF across all training stations.
+    # Site context embedding (SiteContextEmbedding):
+    #     A window-level bias derived from location + climate features, added
+    #     once to all W day-tokens before the Transformer blocks. This encodes
+    #     site-specific persistence structure (e.g. arid sites have higher
+    #     clear-sky ACF than marine temperate sites). Without this, the model
+    #     learns a pooled average ACF across all training stations.
 
-    d_z_full is derived as:
-        cfg["vae"]["latent_dim"] + cfg["vae"].get("z_var_dim", 0)
-    Add vae.z_var_dim to config to enable the z_var variability latent.
-    """
+    # d_z_full is derived as:
+    #     cfg["vae"]["latent_dim"] + cfg["vae"].get("z_var_dim", 0)
+    # Add vae.z_var_dim to config to enable the z_var variability latent.
+    # 
 
     def __init__(self, cfg: Dict):
         super().__init__()
@@ -496,15 +490,15 @@ class SolarDenoiser(nn.Module):
         intraday_phys: torch.Tensor,
         valid_mask:    torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Pre-project intraday physics to cross-attention K/V once before the
-        denoising loop. Intraday physics are deterministic so projecting them
-        inside every denoising step wastes compute.
+        # Pre-project intraday physics to cross-attention K/V once before the
+        # denoising loop. Intraday physics are deterministic so projecting them
+        # inside every denoising step wastes compute.
 
-        Returns
-        -------
-        phys_kv    : (B*W, T_max, d_model)
-        key_pad_bw : (B*W, T_max) bool — True = padding position
-        """
+        # Returns
+        # -------
+        # phys_kv    : (B*W, T_max, d_model)
+        # key_pad_bw : (B*W, T_max) bool — True = padding position
+        # 
         B, W, T_max, _ = intraday_phys.shape
         kv = self.intraday_proj(intraday_phys).reshape(B * W, T_max, self.d_model)
 
@@ -530,12 +524,12 @@ class SolarDenoiser(nn.Module):
         key_pad_cache:  torch.Tensor | None = None,
         regime_ids:     torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """CFG inference: v_guided = v_uncond + guidance_scale · (v_cond − v_uncond).
+        # CFG inference: v_guided = v_uncond + guidance_scale · (v_cond − v_uncond).
 
-        The unconditional pass uses drop_mask=all_True, which routes the regime
-        embedding to the null token (index n_regimes) and replaces the physics
-        conditioning with the learned null embeddings.
-        """
+        # The unconditional pass uses drop_mask=all_True, which routes the regime
+        # embedding to the null token (index n_regimes) and replaces the physics
+        # conditioning with the learned null embeddings.
+        # 
         B       = tau_k.shape[0]
         no_drop  = torch.zeros(B, device=tau_k.device, dtype=torch.bool)
         all_drop = torch.ones(B,  device=tau_k.device, dtype=torch.bool)
@@ -551,9 +545,8 @@ class SolarDenoiser(nn.Module):
         return v_uncond + guidance_scale * (v_cond - v_uncond)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Diffusion training loss
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 def diffusion_loss(
     v_pred:          torch.Tensor,
@@ -562,7 +555,7 @@ def diffusion_loss(
     min_snr_gamma:   float = 5.0,
     day_weights:     Optional[torch.Tensor] = None,
     day_mask:        Optional[torch.Tensor] = None,
-    # ── Auxiliary losses ────────────────────────────────────────────────────
+    #  Auxiliary losses 
     tau0_hat:        Optional[torch.Tensor] = None,
     tau0_true:       Optional[torch.Tensor] = None,
     temporal_weight: float = 0.0,
@@ -570,62 +563,62 @@ def diffusion_loss(
     ramp_snr_floor:  float = 1.0,
     snr_for_aux:     Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Min-SNR-γ weighted MSE loss on v-prediction targets (Hang et al. 2023).
+    # Min-SNR-γ weighted MSE loss on v-prediction targets (Hang et al. 2023).
 
-    w(k) = min(SNR_k, γ) / (1 + SNR_k)
+    # w(k) = min(SNR_k, γ) / (1 + SNR_k)
 
-    Parameters
-    ----------
-    snr:              (B,) or (B, W) per-step or per-day SNR.
-    day_weights:      (B, W) per-day regime emphasis weights.
-                      Applied BEFORE reducing over W so that each day is weighted
-                      individually by its regime.  Previous design averaged these
-                      into a (B,) window-mean first, which diluted overcast weights
-                      in predominantly-clear windows:
-                        [13 clear + 1 overcast] → effective weight ≈ 1.11 × overcast day
-                        instead of 2.5 × overcast day.
-                      Per-day application corrects this.
-    day_mask:         (B, W) bool — only True positions contribute to the loss.
-                      Used during inpainting training to exclude context positions
-                      pinned to clean tau0 (their v-target is meaningless).
-    tau0_hat:         (B, W, d_z) predicted τ₀ recovered from v-prediction.
-                      Required when temporal_weight > 0 or variance_weight > 0.
-    tau0_true:        (B, W, d_z) ground-truth τ₀.  Required for variance_weight.
-    temporal_weight:  Weight for day-to-day τ-difference MSE (ramp coherence).
-                      Penalises |Δτ̂₀[t] − Δτ₀[t]|² where Δ = consecutive difference.
-                      Helps the denoiser learn realistic ramp profiles between
-                      clear and overcast days.  Only applied at SNR ≥ ramp_snr_floor
-                      (high-quality denoising steps; skip at very high noise).
-    variance_weight:  Weight for window-level τ-std matching.
-                      Penalises |std(τ̂₀) − std(τ₀)|² across the W-day window.
-                      Prevents the denoiser from collapsing toward the mean τ
-                      (mode collapse in τ-space → all days look like mixed regime).
-    ramp_snr_floor:   Minimum SNR to apply aux losses.  Aux losses on high-noise
-                      steps are dominated by noise rather than signal and add
-                      noise to the gradient.  Default 1.0 (√ᾱ ≈ √(1−ᾱ)).
-    snr_for_aux:      SNR tensor for aux-loss gating (same shape as snr).
+    # Parameters
+    # ----------
+    # snr:              (B,) or (B, W) per-step or per-day SNR.
+    # day_weights:      (B, W) per-day regime emphasis weights.
+    #                   Applied BEFORE reducing over W so that each day is weighted
+    #                   individually by its regime.  Previous design averaged these
+    #                   into a (B,) window-mean first, which diluted overcast weights
+    #                   in predominantly-clear windows:
+    #                     [13 clear + 1 overcast] → effective weight ≈ 1.11 × overcast day
+    #                     instead of 2.5 × overcast day.
+    #                   Per-day application corrects this.
+    # day_mask:         (B, W) bool — only True positions contribute to the loss.
+    #                   Used during inpainting training to exclude context positions
+    #                   pinned to clean tau0 (their v-target is meaningless).
+    # tau0_hat:         (B, W, d_z) predicted τ₀ recovered from v-prediction.
+    #                   Required when temporal_weight > 0 or variance_weight > 0.
+    # tau0_true:        (B, W, d_z) ground-truth τ₀.  Required for variance_weight.
+    # temporal_weight:  Weight for day-to-day τ-difference MSE (ramp coherence).
+    #                   Penalises |Δτ̂₀[t] − Δτ₀[t]|² where Δ = consecutive difference.
+    #                   Helps the denoiser learn realistic ramp profiles between
+    #                   clear and overcast days.  Only applied at SNR ≥ ramp_snr_floor
+    #                   (high-quality denoising steps; skip at very high noise).
+    # variance_weight:  Weight for window-level τ-std matching.
+    #                   Penalises |std(τ̂₀) − std(τ₀)|² across the W-day window.
+    #                   Prevents the denoiser from collapsing toward the mean τ
+    #                   (mode collapse in τ-space → all days look like mixed regime).
+    # ramp_snr_floor:   Minimum SNR to apply aux losses.  Aux losses on high-noise
+    #                   steps are dominated by noise rather than signal and add
+    #                   noise to the gradient.  Default 1.0 (√ᾱ ≈ √(1−ᾱ)).
+    # snr_for_aux:      SNR tensor for aux-loss gating (same shape as snr).
 
-    Returns
-    -------
-    loss:      Total scalar loss (MSE + temporal + variance).
-    l_temporal: Temporal coherence aux loss (zero tensor if weight=0).
-    l_variance: Distribution variance aux loss (zero tensor if weight=0).
-    """
+    # Returns
+    # -------
+    # loss:      Total scalar loss (MSE + temporal + variance).
+    # l_temporal: Temporal coherence aux loss (zero tensor if weight=0).
+    # l_variance: Distribution variance aux loss (zero tensor if weight=0).
+    # 
     err = (v_pred - v_target) ** 2                    # (B, W, d_z)
     err_per_day = err.mean(dim=2)                     # (B, W)
 
-    # ── Min-SNR-γ weighting ─────────────────────────────────────────────────
+    #  Min-SNR-γ weighting 
     if snr is not None:
         w_snr = torch.clamp(snr, max=min_snr_gamma) / (1.0 + snr)
         if w_snr.dim() == 1:
             w_snr = w_snr.view(-1, 1)                # broadcast over W
         err_per_day = err_per_day * w_snr
 
-    # ── Per-day regime weights ───────────────────────────────────────────────
+    #  Per-day regime weights 
     if day_weights is not None:
         err_per_day = err_per_day * day_weights
 
-    # ── Day mask (inpainting context exclusion) ──────────────────────────────
+    #  Day mask (inpainting context exclusion) 
     if day_mask is not None:
         mask_f     = day_mask.float()
         n_active   = mask_f.sum(dim=1).clamp(min=1.0)
@@ -635,7 +628,7 @@ def diffusion_loss(
 
     mse_loss = per_sample.mean()
 
-    # ── Temporal coherence auxiliary loss ────────────────────────────────────
+    #  Temporal coherence auxiliary loss 
     # |Δτ̂₀[t] − Δτ₀[t]|²  where Δ = first-order consecutive difference across W.
     # Penalises errors in day-to-day transitions (ramp reproduction).
     # Only applied at steps where SNR ≥ ramp_snr_floor.
@@ -652,7 +645,7 @@ def diffusion_loss(
             d_true = tau0_true[:, 1:, :] - tau0_true[:, :-1, :]
             l_temporal = temporal_weight * (d_hat - d_true).pow(2).mean()
 
-    # ── Distribution variance auxiliary loss ─────────────────────────────────
+    #  Distribution variance auxiliary loss 
     # |std(τ̂₀, dim=W) − std(τ₀, dim=W)|²  per batch element.
     # Penalises variance collapse in τ-space (all days converging toward mean τ).
     l_variance = torch.zeros(1, device=v_pred.device)
@@ -665,12 +658,12 @@ def diffusion_loss(
     return loss, l_temporal.detach(), l_variance.detach()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # EMA of model weights
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 class EMA:
-    """EMA of model parameters: shadow ← decay·shadow + (1−decay)·param."""
+    # EMA of model parameters: shadow ← decay·shadow + (1−decay)·param
 
     def __init__(self, model: nn.Module, decay: float):
         self.decay  = decay
@@ -682,11 +675,11 @@ class EMA:
             self.shadow[k].mul_(self.decay).add_(v.detach(), alpha=1.0 - self.decay)
 
     def copy_to(self, model: nn.Module) -> None:
-        """Copy EMA shadow weights into model parameters."""
+        # Copy EMA shadow weights into model parameters
         for k, v in model.named_parameters():
             v.data.copy_(self.shadow[k])
 
     def restore(self, model: nn.Module, original: Dict) -> None:
-        """Restore raw model weights from a snapshot taken before copy_to()."""
+        # Restore raw model weights from a snapshot taken before copy_to()
         for k, v in model.named_parameters():
             v.data.copy_(original[k])
