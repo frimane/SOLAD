@@ -804,7 +804,63 @@ def _ax_style(ax, title="", xlabel="", ylabel=""):
     if ylabel:
         ax.set_ylabel(ylabel, color=_P["muted"], fontsize=10, fontfamily="monospace", labelpad=8)
 
-def make_station_map():
+# def make_station_map():
+#     USA = [
+#         (-124.7,48.4),(-124.2,46.2),(-124.5,43.0),(-124.1,40.4),(-120.5,34.5),
+#         (-117.1,32.5),(-114.8,32.5),(-111.0,31.3),(-108.2,31.3),(-106.5,31.8),
+#         (-104.0,29.6),(-101.0,29.8),(-97.3,25.9),(-96.6,25.8),(-97.1,26.8),
+#         (-97.4,27.8),(-97.0,28.5),(-94.7,29.4),(-90.0,29.0),(-89.1,30.1),
+#         (-88.0,30.2),(-85.7,30.1),(-84.9,29.7),(-82.0,29.4),(-81.1,25.1),
+#         (-80.1,25.1),(-80.1,27.0),(-80.8,28.8),(-80.5,31.0),(-81.4,31.9),
+#         (-81.2,32.8),(-78.5,33.9),(-75.7,35.2),(-75.5,37.0),(-76.0,37.9),
+#         (-75.2,38.0),(-74.0,39.5),(-74.2,40.5),(-72.0,41.3),(-71.9,42.0),
+#         (-70.0,43.0),(-67.0,44.8),(-67.8,47.1),(-69.2,47.5),(-76.9,43.0),
+#         (-79.0,43.1),(-79.0,42.0),(-82.5,41.8),(-82.7,42.6),(-83.1,42.1),
+#         (-84.4,46.5),(-87.0,45.1),(-88.0,48.0),(-90.0,48.1),(-92.0,48.5),
+#         (-95.2,49.0),(-100.0,49.0),(-104.0,49.0),(-110.0,49.0),(-114.1,49.0),
+#         (-117.0,49.0),(-120.0,49.0),(-123.3,48.6),(-124.7,48.4),
+#     ]
+#     STATE_SEGS = [
+#         [(-104.05,49.0),(-104.05,41.0)],[(-111.05,49.0),(-111.05,41.0)],
+#         [(-114.05,42.0),(-114.05,34.0)],[(-120.0,42.0),(-120.0,37.0)],
+#         [(-109.05,45.0),(-109.05,31.3)],[(-100.0,49.0),(-100.0,43.0)],
+#         [(-96.5,43.5),(-96.5,40.5)],[(-91.0,43.5),(-91.0,40.6)],
+#         [(-87.5,42.5),(-87.5,39.0)],[(-84.8,39.1),(-84.8,36.6)],
+#         [(-89.5,35.0),(-89.5,32.0)],[(-94.0,36.5),(-94.0,33.7)],
+#         [(-103.0,36.5),(-103.0,32.0)],
+#     ]
+#     fig, ax = plt.subplots(figsize=(9, 4.5))
+#     fig.patch.set_visible(False)
+#     ax.set_facecolor("none")
+#     ax.patch.set_visible(False)
+#     xs = [p[0] for p in USA]; ys = [p[1] for p in USA]
+#     ax.fill(xs, ys, color=_P["bg1"], zorder=1)
+#     ax.plot(xs+[xs[0]], ys+[ys[0]], color=_P["border"], lw=0.9, zorder=2)
+#     for seg in STATE_SEGS:
+#         ax.plot([p[0] for p in seg],[p[1] for p in seg],
+#                 color=_P["border"], lw=0.5, zorder=2, alpha=0.6)
+#     LBL_OFF = {"BON":(0.6,0.5),"DRA":(-4.2,0.5),"FPK":(0.6,0.5),
+#                "GWN":(0.6,-1.1),"PSU":(0.6,0.5),"SXF":(0.6,-1.1)}
+#     for sid, m in STATION_META.items():
+#         dx, dy = LBL_OFF.get(sid, (0.6, 0.5))
+#         ax.plot(m["lon"],m["lat"],"o",ms=8,mfc="none",mec=_P["amber"],mew=1.4,zorder=5)
+#         ax.plot(m["lon"],m["lat"],"o",ms=3.2,mfc=_P["amber"],mec="none",zorder=6)
+#         ax.text(m["lon"]+dx,m["lat"]+dy,sid,fontsize=7.5,color=_P["text"],
+#                 fontfamily="monospace",fontweight="bold",ha="left",va="bottom",zorder=7,
+#                 bbox=dict(boxstyle="square,pad=0.20",fc=_P["bg1"],ec=_P["border"],alpha=0.95,lw=0.7))
+#     ax.set_xlim(-126.0,-66.0); ax.set_ylim(24.0,50.5)
+#     ax.axis("off"); fig.tight_layout(pad=0.5)
+#     return fig
+def make_station_map_svg():
+    W, H = 600, 300
+    lon_min, lon_max = -126.0, -66.0
+    lat_min, lat_max = 24.0, 50.5
+
+    def proj(lon, lat):
+        x = (lon - lon_min) / (lon_max - lon_min) * W
+        y = H - (lat - lat_min) / (lat_max - lat_min) * H
+        return round(x, 1), round(y, 1)
+
     USA = [
         (-124.7,48.4),(-124.2,46.2),(-124.5,43.0),(-124.1,40.4),(-120.5,34.5),
         (-117.1,32.5),(-114.8,32.5),(-111.0,31.3),(-108.2,31.3),(-106.5,31.8),
@@ -820,6 +876,8 @@ def make_station_map():
         (-95.2,49.0),(-100.0,49.0),(-104.0,49.0),(-110.0,49.0),(-114.1,49.0),
         (-117.0,49.0),(-120.0,49.0),(-123.3,48.6),(-124.7,48.4),
     ]
+    outline = " ".join(f"{proj(lon,lat)[0]},{proj(lon,lat)[1]}" for lon,lat in USA)
+
     STATE_SEGS = [
         [(-104.05,49.0),(-104.05,41.0)],[(-111.05,49.0),(-111.05,41.0)],
         [(-114.05,42.0),(-114.05,34.0)],[(-120.0,42.0),(-120.0,37.0)],
@@ -829,28 +887,38 @@ def make_station_map():
         [(-89.5,35.0),(-89.5,32.0)],[(-94.0,36.5),(-94.0,33.7)],
         [(-103.0,36.5),(-103.0,32.0)],
     ]
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    fig.patch.set_visible(False)
-    ax.set_facecolor("none")
-    ax.patch.set_visible(False)
-    xs = [p[0] for p in USA]; ys = [p[1] for p in USA]
-    ax.fill(xs, ys, color=_P["bg1"], zorder=1)
-    ax.plot(xs+[xs[0]], ys+[ys[0]], color=_P["border"], lw=0.9, zorder=2)
-    for seg in STATE_SEGS:
-        ax.plot([p[0] for p in seg],[p[1] for p in seg],
-                color=_P["border"], lw=0.5, zorder=2, alpha=0.6)
-    LBL_OFF = {"BON":(0.6,0.5),"DRA":(-4.2,0.5),"FPK":(0.6,0.5),
-               "GWN":(0.6,-1.1),"PSU":(0.6,0.5),"SXF":(0.6,-1.1)}
+    segs_svg = "".join(
+        f'<line x1="{proj(s[0][0],s[0][1])[0]}" y1="{proj(s[0][0],s[0][1])[1]}" '
+        f'x2="{proj(s[1][0],s[1][1])[0]}" y2="{proj(s[1][0],s[1][1])[1]}" '
+        f'stroke="#1a2e48" stroke-width="0.6" opacity="0.7"/>'
+        for s in STATE_SEGS
+    )
+
+    LBL_OFF = {"BON":(8,4),"DRA":(-30,4),"FPK":(8,4),
+           "GWN":(8,-12),"PSU":(8,4),"SXF":(8,-12),"TBL":(8,4)}
+
+    stations_svg = ""
     for sid, m in STATION_META.items():
-        dx, dy = LBL_OFF.get(sid, (0.6, 0.5))
-        ax.plot(m["lon"],m["lat"],"o",ms=8,mfc="none",mec=_P["amber"],mew=1.4,zorder=5)
-        ax.plot(m["lon"],m["lat"],"o",ms=3.2,mfc=_P["amber"],mec="none",zorder=6)
-        ax.text(m["lon"]+dx,m["lat"]+dy,sid,fontsize=7.5,color=_P["text"],
-                fontfamily="monospace",fontweight="bold",ha="left",va="bottom",zorder=7,
-                bbox=dict(boxstyle="square,pad=0.20",fc=_P["bg1"],ec=_P["border"],alpha=0.95,lw=0.7))
-    ax.set_xlim(-126.0,-66.0); ax.set_ylim(24.0,50.5)
-    ax.axis("off"); fig.tight_layout(pad=0.5)
-    return fig
+        cx, cy = proj(m["lon"], m["lat"])
+        dx, dy = LBL_OFF.get(sid, (8, 4))
+        lbl_w = len(sid) * 6 + 8
+        lbl_h = 12
+        stations_svg += (
+            f'<circle cx="{cx}" cy="{cy}" r="5" fill="none" stroke="#e8b84b" stroke-width="1.4"/>'
+            f'<circle cx="{cx}" cy="{cy}" r="2" fill="#e8b84b"/>'
+            f'<rect x="{cx+dx-2}" y="{cy+dy-9}" width="{lbl_w}" height="{lbl_h}" '
+            f'fill="#0c1929" stroke="#1a2e48" stroke-width="0.6" rx="1"/>'
+            f'<text x="{cx+dx+2}" y="{cy+dy}" font-family="monospace" font-size="8.5" '
+            f'font-weight="bold" fill="#f0f4f8">{sid}</text>'
+        )
+
+    return f"""
+<svg viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg"
+     style="width:100%;height:auto;display:block;background:transparent;">
+  <polygon points="{outline}" fill="#0c1929" stroke="#1a2e48" stroke-width="0.9"/>
+  {segs_svg}
+  {stations_svg}
+</svg>"""
 
 
 def plot_irradiance(gen, cs_ghi, dates, cfg):
@@ -1256,9 +1324,10 @@ with st.expander("About", expanded=False):
         # -- Map --
         st.markdown("<div class='sec-rule'>SURFRAD Network</div>", unsafe_allow_html=True)
         st.markdown("<div class='panel-flush'>", unsafe_allow_html=True)
-        fig_map = make_station_map()
-        st.pyplot(fig_map, use_container_width=True)
-        plt.close(fig_map)
+        # fig_map = make_station_map()
+        # st.pyplot(fig_map, use_container_width=True)
+        # plt.close(fig_map)
+        st.markdown(make_station_map_svg(), unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
         # -- Table --
         st.markdown("<div class='sec-rule' style='margin-top:1.2rem;'>Training Stations</div>", unsafe_allow_html=True)
