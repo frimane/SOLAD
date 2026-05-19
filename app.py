@@ -501,8 +501,17 @@ html { scroll-behavior: smooth !important; }
 #solad-title span.amb { color: #e8b84b !important; }
 
 /* About section - stretch columns to equal height */
+[data-testid="stHorizontalBlock"] {
+    align-items: stretch !important;
+}
 [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-    min-height: 400px;
+    display: flex !important;
+    flex-direction: column !important;
+}
+[data-testid="stHorizontalBlock"] > [data-testid="stColumn"] > div:first-child {
+    flex: 1 !important;
+    display: flex !important;
+    flex-direction: column !important;
 }
 
 /* -- MOBILE RESPONSIVENESS -- */
