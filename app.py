@@ -605,16 +605,6 @@ html { scroll-behavior: smooth !important; }
     }
 }
 
-@media (max-width: 768px) {
-    [data-testid="stExpander"] [data-testid="stHorizontalBlock"] {
-        flex-direction: column !important;
-    }
-    [data-testid="stExpander"] [data-testid="stHorizontalBlock"] > div {
-        width: 100% !important;
-        min-width: 100% !important;
-    }
-}
-
 @media (max-width: 480px) {
     /* metric cards: single column on very small phones */
     .metric-row {
@@ -1295,11 +1285,13 @@ st.markdown("<hr class='hdiv'>", unsafe_allow_html=True)
 # SECTION 1 - ABOUT
 st.markdown('<a class="section-anchor" id="about"></a>', unsafe_allow_html=True)
 
-with st.expander("About", expanded=False):
-    # -- Two-column About layout: left = text, right = map (top) + table (bottom) --
-    col_text, col_right = st.columns([1.2, 1], gap="medium")
-    with col_text:
-        st.markdown("""
+about = st.expander("About", expanded=False, on_change="rerun")
+
+if about.open:
+    with about:
+        col_text, col_right = st.columns([1.2, 1], gap="medium")
+        with col_text:
+            st.markdown("""
   <div <br><br> 
   </div> <div <br><br> 
   </div>
@@ -1330,29 +1322,29 @@ with st.expander("About", expanded=False):
   </div>
 </div>
 """, unsafe_allow_html=True) #<em>The guiding principle: use the minimum to learn and need the minimum to work.</em>
-    with col_right:
+        with col_right:
         # -- Map --
-        st.markdown("<div class='sec-rule'>SURFRAD Network</div>", unsafe_allow_html=True)
-        st.markdown("<div class='panel-flush'>", unsafe_allow_html=True)
+            st.markdown("<div class='sec-rule'>SURFRAD Network</div>", unsafe_allow_html=True)
+            st.markdown("<div class='panel-flush'>", unsafe_allow_html=True)
         # fig_map = make_station_map()
         # st.pyplot(fig_map, use_container_width=True)
         # plt.close(fig_map)
-        st.markdown(make_station_map_svg(), unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown(make_station_map_svg(), unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
         # -- Table --
-        st.markdown("<div class='sec-rule' style='margin-top:1.2rem;'>Training Stations</div>", unsafe_allow_html=True)
-        rows_html = "".join(
+            st.markdown("<div class='sec-rule' style='margin-top:1.2rem;'>Training Stations</div>", unsafe_allow_html=True)
+            rows_html = "".join(
             f"<tr><td>{sid}</td><td>{m['name']}</td>"
             f"<td>{m['lat']:.3f}&deg;&thinsp;N</td>"
             f"<td>{m['lon']:.3f}&deg;&thinsp;E</td>"
             f"<td style='color:var(--mu)'>{m['climate']}</td></tr>"
-            for sid, m in STATION_META.items()
+                for sid, m in STATION_META.items()
         )
-        st.markdown(
+            st.markdown(
             f"<table class='st-table'>"
             f"<thead><tr><th>ID</th><th>Location</th><th>Lat</th><th>Lon</th><th>Climate</th></tr></thead>"
             f"<tbody>{rows_html}</tbody></table>",
-            unsafe_allow_html=True,
+                unsafe_allow_html=True,
         )
 
 st.markdown("<hr class='hdiv'>", unsafe_allow_html=True)
