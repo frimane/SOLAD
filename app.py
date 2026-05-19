@@ -605,17 +605,6 @@ html { scroll-behavior: smooth !important; }
     }
 }
 
-* {
-    -webkit-tap-highlight-color: transparent;
-}
-
-details > summary {
-    touch-action: manipulation;
-    cursor: pointer;
-    user-select: none;
-    -webkit-user-select: none;
-}
-
 @media (max-width: 480px) {
     /* metric cards: single column on very small phones */
     .metric-row {
@@ -1101,7 +1090,7 @@ components.html("""
       a.classList.toggle('active', a.dataset.section === id);
     });
   }
-  var sections = [''generation', about', 'data'];
+  var sections = ['generation', about', 'data'];
   var observer = new window.parent.IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
       if (entry.isIntersecting) setActive(entry.target.id);
@@ -1122,7 +1111,7 @@ components.html("""
 
 
 # SECTION 2 - GENERATION
-st.markdown('<a class="section-anchor" id="generation"></a>', unsafe_allow_html=True)
+# st.markdown('<a class="section-anchor" id="generation"></a>', unsafe_allow_html=True)
 st.markdown("""
 <a class="section-anchor" id="generation"></a>
 <div id='solad-title' style='font-family:Syne,system-ui,sans-serif;font-size:2.1rem;font-weight:700;line-height:1.2;letter-spacing:-0.01em;padding-top:1.5rem;padding-bottom:0.75rem;'>
@@ -1301,11 +1290,8 @@ with st.expander("About", expanded=False):
     col_text, col_right = st.columns([1.2, 1], gap="medium")
     with col_text:
         st.markdown("""
-  <div <br><br> 
-  </div> <div <br><br> 
-  </div>
   <div class='prose' style='font-size:0.88rem;line-height:1.85;font-family:Courier New,Courier,monospace;text-align:justify;'>
-  SOLAD Generates 10-mmin realistic synthetic solar irradiance time series at arbitrary locations
+  <br><br> <br><br> SOLAD Generates 10-mmin realistic synthetic solar irradiance time series at arbitrary locations
   and date ranges -- with no weather data, no sensors, and no observations required
   at inference time. Coordinates and a date range are the only inputs. 
   Currently, it generates the global irradiance, but it can be extended to include both direct and diffuse channels.
