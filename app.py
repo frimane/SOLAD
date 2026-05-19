@@ -177,6 +177,7 @@ html, body,
     padding-left: 2.5rem !important;
     padding-right: 2.5rem !important;
     max-width: 100% !important;
+    margin-top: -3rem !important;
 }
 section[data-testid="stMain"] > div { background: var(--bg0) !important; }
 .block-container { padding-top: 0 !important; }
