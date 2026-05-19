@@ -1090,13 +1090,13 @@ components.html("""
       a.classList.toggle('active', a.dataset.section === id);
     });
   }
-  var sections = ['generation', about', 'data'];
+  var sections = ['generation', 'about', 'data'];  // add missing quote
   var observer = new window.parent.IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
       if (entry.isIntersecting) setActive(entry.target.id);
     });
   }, { rootMargin: '-56px 0px -60% 0px', threshold: 0 });
-  function observe() {active
+  function observe() {
     var found = 0;
     sections.forEach(function(id) {
       var el = window.parent.document.getElementById(id);
