@@ -1,6 +1,20 @@
 # Physics-Guided Latent Diffusion for Synthetic Solar Irradiance Generation
 
-SOLAD generates arbitrarily long, 10-minute resolution global horizontal irradiance sequences given only a site's latitude, longitude, and date range, without any concurrent meteorological observations.
+SOLAD generates arbitrarily long, 10-minute resolution GHI sequences given
+only a site's latitude, longitude, and date range, without any concurrent
+meteorological observations.
+
+<div align="center">
+
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://solad1.streamlit.app/)
+&nbsp;
+[![GitHub](https://img.shields.io/badge/GitHub-Code-181717?logo=github)](https://github.com/frimane/SOLAD)
+&nbsp;
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
+**🌍 No installation needed — generate synthetic solar irradiance for any location, directly in your browser.**
+
+</div>
 
 ---
 
