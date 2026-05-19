@@ -605,26 +605,6 @@ html { scroll-behavior: smooth !important; }
     }
 }
 
-/* style the about toggle button to look like an expander header */
-[data-testid="stButton"][key="about_toggle_btn"] > button,
-div:has(> [data-testid="baseButton-secondary"]) > button {
-    background: var(--bg1) !important;
-    color: var(--mu) !important;
-    border: 1px solid var(--brd) !important;
-    border-radius: var(--r) !important;
-    text-align: left !important;
-    font-size: var(--t-xs) !important;
-    letter-spacing: 0.10em !important;
-    font-weight: 500 !important;
-    justify-content: flex-start !important;
-    padding: 0.75rem 1rem !important;
-    color: var(--mu) !important;
-}
-div:has(> [data-testid="baseButton-secondary"]) > button:hover {
-    background: var(--bg2) !important;
-    color: var(--tx) !important;
-}
-
 @media (max-width: 480px) {
     /* metric cards: single column on very small phones */
     .metric-row {
@@ -1110,13 +1090,13 @@ components.html("""
       a.classList.toggle('active', a.dataset.section === id);
     });
   }
-  var sections = ['generation', 'about', 'data'];  // add missing quote
+  var sections = ['generation', about', 'data'];
   var observer = new window.parent.IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
       if (entry.isIntersecting) setActive(entry.target.id);
     });
   }, { rootMargin: '-56px 0px -60% 0px', threshold: 0 });
-  function observe() {
+  function observe() {active
     var found = 0;
     sections.forEach(function(id) {
       var el = window.parent.document.getElementById(id);
@@ -1304,20 +1284,9 @@ st.markdown("<hr class='hdiv'>", unsafe_allow_html=True)
 
 # SECTION 1 - ABOUT
 st.markdown('<a class="section-anchor" id="about"></a>', unsafe_allow_html=True)
-if "about_open" not in st.session_state:
-    st.session_state.about_open = True
 
-def toggle_about():
-    st.session_state.about_open = not st.session_state.about_open
-
-st.button(
-    "About ▴" if st.session_state.about_open else "About ▾",
-    on_click=toggle_about,
-    use_container_width=True,
-    key="about_toggle_btn",
-)
-
-if st.session_state.about_open:
+with st.expander("About", expanded=False):
+    # -- Two-column About layout: left = text, right = map (top) + table (bottom) --
     col_text, col_right = st.columns([1.2, 1], gap="medium")
     with col_text:
         st.markdown("""
