@@ -12,7 +12,7 @@ meteorological observations.
 &nbsp;
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-**🌍 No installation needed — generate synthetic solar irradiance for any location, directly in your browser.**
+**🌍 No installation needed — generate synthetic data directly in your browser.**
 
 </div>
 
