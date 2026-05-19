@@ -1322,7 +1322,7 @@ with st.expander("About", expanded=False):
   observations, sky imagery, or richer inputs requires only a lightweight addition,
   naturally extending the model into a forecaster or a prompt-driven generator -- 
   free-text scene descriptions as generation prompts. 
-  Code, weights, and technical details are available in the accompanying <a href='https://github.com/frimane/SOLAD' title='https://github.com/frimane/SOLAD' style='color:#5b9bd5;text-decoration:none;'>GitHub</a>. 
+  Code, weights, and technical details are available in the accompanying <a href='https://github.com/frimane/SOLAD' title='https://github.com/frimane/SOLAD' style='color:#5b9bd5;text-decoration:none;'>GitHub</a> 
   repository and the <a href='#' title='Link will be available upon publication' style='color:#5b9bd5;text-decoration:none;cursor:help;'>research paper</a>.
   </div>
 </div>
