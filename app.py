@@ -332,6 +332,8 @@ label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
     border-radius: var(--r) !important;
     background: var(--bg1) !important;
     margin-bottom: 0.5rem !important;
+    position: relative !important;
+    z-index: 1 !important;
 }
 [data-testid="stExpander"] summary {
     font-family: var(--mono) !important;
@@ -341,6 +343,13 @@ label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
     text-transform: uppercase !important;
     letter-spacing: 0.08em !important;
     padding: 0.75rem 1rem !important;
+    position: relative !important;
+    z-index: 10000 !important;
+    pointer-events: auto !important;
+    -webkit-tap-highlight-color: rgba(232,184,75,0.15) !important;
+    touch-action: manipulation !important;
+    cursor: pointer !important;
+    min-height: 44px !important;
 }
 [data-testid="stExpander"] summary:hover { color: var(--tx) !important; }
 [data-testid="stExpanderDetails"] { padding: 0 1rem 1rem !important; }
@@ -604,22 +613,6 @@ html { scroll-behavior: smooth !important; }
     .callout, .note-box, .step-box {
         font-size: 0.72rem !important;
     }
-}
-
-/* Fix expander tap on mobile - ensure summary is always tappable */
-[data-testid="stExpander"] summary {
-    position: relative !important;
-    z-index: 10000 !important;
-    pointer-events: auto !important;
-    -webkit-tap-highlight-color: rgba(232,184,75,0.15) !important;
-    touch-action: manipulation !important;
-    cursor: pointer !important;
-    min-height: 44px !important;
-}
-
-[data-testid="stExpander"] {
-    position: relative !important;
-    z-index: 10000 !important;
 }
 
 @media (max-width: 480px) {
