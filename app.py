@@ -1091,25 +1091,25 @@ st.markdown(f"""
 <div class="nav-spacer"></div>
 """, unsafe_allow_html=True)
 
-components.html("""
+st.markdown("""
 <script>
 (function() {
   function setActive(id) {
-    var links = window.parent.document.querySelectorAll('.nav-link');
+    var links = document.querySelectorAll('.nav-link');
     links.forEach(function(a) {
       a.classList.toggle('active', a.dataset.section === id);
     });
   }
-  var sections = ['generation', about', 'data']; 
-  var observer = new window.parent.IntersectionObserver(function(entries) {
+  var sections = ['generation', 'about', 'data'];
+  var observer = new IntersectionObserver(function(entries) {
     entries.forEach(function(entry) {
       if (entry.isIntersecting) setActive(entry.target.id);
     });
   }, { rootMargin: '-56px 0px -60% 0px', threshold: 0 });
-  function observe() {active
+  function observe() {
     var found = 0;
     sections.forEach(function(id) {
-      var el = window.parent.document.getElementById(id);
+      var el = document.getElementById(id);
       if (el) { observer.observe(el); found++; }
     });
     if (found < sections.length) setTimeout(observe, 300);
@@ -1117,7 +1117,7 @@ components.html("""
   observe();
 })();
 </script>
-""", height=0)
+""", unsafe_allow_html=True)
 
 
 # SECTION 2 - GENERATION
