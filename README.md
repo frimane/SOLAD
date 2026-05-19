@@ -8,8 +8,6 @@ meteorological observations.
 
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://solad1.streamlit.app/)
 &nbsp;
-[![GitHub](https://img.shields.io/badge/GitHub-Code-181717?logo=github)](https://github.com/frimane/SOLAD)
-&nbsp;
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 **🌍 No installation needed — generate synthetic data directly in your browser.**
