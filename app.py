@@ -1405,6 +1405,8 @@ st.markdown(
     f" &nbsp;&middot;&nbsp; "
     f"Questions or feedback: "
     f"<a href='mailto:Azeddine.frimane@yahoo.com' style='color:#5b9bd5;text-decoration:none;'>Azeddine.frimane@yahoo.com</a>"
+    f" &nbsp;&middot;&nbsp; "
+    f"<a href='https://github.com/frimane/SOLAD' style='color:#5b9bd5;text-decoration:none;'>GitHub</a>"
     f"</span></div>",
     unsafe_allow_html=True,
 )
