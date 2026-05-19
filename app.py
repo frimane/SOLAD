@@ -1327,7 +1327,7 @@ with st.expander("About", expanded=False):
         # fig_map = make_station_map()
         # st.pyplot(fig_map, use_container_width=True)
         # plt.close(fig_map)
-        st.markdown(make_station_map_svg(), unsafe_allow_html=True)
+        #st.markdown(make_station_map_svg(), unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
         # -- Table --
         st.markdown("<div class='sec-rule' style='margin-top:1.2rem;'>Training Stations</div>", unsafe_allow_html=True)
