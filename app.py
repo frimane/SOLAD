@@ -14,6 +14,8 @@ import pandas as pd                   # top-level - no more deferred import insi
 import streamlit as st
 import torch
 import yaml
+import streamlit.components.v1 as components
+
 
 # ==============================================================================
 # LOCAL / PROJECT IMPORTS  (kept deferred inside cached loaders to avoid
@@ -1307,7 +1309,7 @@ with st.expander("About", expanded=False):
     with col_text:
         st.markdown("""
   <div class='prose' style='font-size:0.88rem;line-height:1.85;font-family:Courier New,Courier,monospace;text-align:justify;'>
-  <br><br> <br><br> SOLAD Generates 10-mmin realistic synthetic solar irradiance time series at arbitrary locations
+  <br><br> SOLAD Generates 10-mmin realistic synthetic solar irradiance time series at arbitrary locations
   and date ranges -- with no weather data, no sensors, and no observations required
   at inference time. Coordinates and a date range are the only inputs. 
   Currently, it generates the global irradiance, but it can be extended to include both direct and diffuse channels.
