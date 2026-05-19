@@ -1091,7 +1091,7 @@ st.markdown(f"""
 <div class="nav-spacer"></div>
 """, unsafe_allow_html=True)
 
-st.markdown("""
+st.html("""
 <script>
 (function() {
   function setActive(id) {
@@ -1117,7 +1117,7 @@ st.markdown("""
   observe();
 })();
 </script>
-""", unsafe_allow_html=True)
+""", unsafe_allow_javascript=True)
 
 
 # SECTION 2 - GENERATION
