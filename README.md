@@ -6,7 +6,7 @@ meteorological observations.
 
 <div align="center">
 
-👉 [![Open in Streamlit](https://img.shields.io/badge/Open%20in-Streamlit-FF4B4B?logo=streamlit&logoColor=white&style=for-the-badge)](https://solad1.streamlit.app/)
+👉 [![Open in Streamlit: https://solad1.streamlit.app/](https://img.shields.io/badge/Open%20in-Streamlit-FF4B4B?logo=streamlit&logoColor=white&style=for-the-badge)](https://solad1.streamlit.app/)
 
 **🌍 No installation needed — generate synthetic data directly in your browser.**
 
