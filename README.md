@@ -6,9 +6,7 @@ meteorological observations.
 
 <div align="center">
 
-👉 [![Open in Streamlit](https://img.shields.io/badge/Open%20in-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://solad1.streamlit.app/)
-&nbsp;
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+👉 [![Open in Streamlit](https://img.shields.io/badge/Open%20in-Streamlit-FF4B4B?logo=streamlit&logoColor=white&style=for-the-badge)](https://solad1.streamlit.app/)
 
 **🌍 No installation needed — generate synthetic data directly in your browser.**
 
@@ -90,7 +88,7 @@ The model is two-stage and trained sequentially. All hyperparameters are in `con
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU General Public License v3.0 — see the [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) file for details.
 
 ## Contact
 
