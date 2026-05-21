@@ -10,6 +10,7 @@ meteorological observations.
 
 **🌍 No installation needed — generate synthetic data directly in your browser.**
 
+💤 If asleep, click **"Yes, get this app back up!"** to wake it 
 </div>
 
 ---
