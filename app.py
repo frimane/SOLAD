@@ -1371,7 +1371,7 @@ with st.expander("Step 1 — Clone the repository", expanded=False):
                 unsafe_allow_html=True)
     st.code("git clone https://github.com/frimane/SOLAD.git\ncd solad", language="bash")
 
-with st.expander("Step 2 — Create a virtual environment", expanded=False):
+with st.expander("Step 2 — Create a virtual environment (optional)", expanded=False):
     st.markdown("<div style='color:#9db4c8; margin-bottom:0.5rem;'>Isolate dependencies from your system Python.</div>",
                 unsafe_allow_html=True)
     st.code("""\
