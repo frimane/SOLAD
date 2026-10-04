@@ -1,0 +1,357 @@
+# SOLAD config 
+# =========================
+# -----------------------------------------------------------------------------
+# Data
+# -----------------------------------------------------------------------------
+data:
+  window_size: 14
+  window_stride: 3
+  zenith_threshold_deg: 85.0
+  max_gap_days: 1
+  max_interpolation_gap_minutes: 120
+  min_present_fraction: 0.70
+  inference_steps_per_day: 144
+
+  regime:
+    n_components: 4
+    n_init: 10
+    covariance_type: full
+    class_names: [clear, mixed_clear, mixed_overcast, overcast]
+    use_latent_relabels: true
+    kmeans_random_state: 42
+    kmeans_n_init: 10
+
+  augmentation:
+    noise_std: 0.02
+    temporal_jitter: 1
+    k_max_clip: 1.30          # must equal physics.k_max
+
+# -----------------------------------------------------------------------------
+# Physics
+# -----------------------------------------------------------------------------
+physics:
+  k_max: 1.30                 # must equal data.augmentation.k_max_clip
+  tau_eps: 1.0e-6
+
+# -----------------------------------------------------------------------------
+# Stage 1: Autoencoder
+# -----------------------------------------------------------------------------
+vae:
+  # 112 dims gives overflow headroom and capacity for cloudy profiles.
+  latent_dim: 112
+
+  # 4-stage encoder captures short-burst ramp events that 3-stage smoothed away.
+  encoder_channels: [64, 128, 256, 384]
+
+  kernel_size: 5
+  stride: 2
+
+  film_hidden_dim: 112        # match latent_dim
+  encoder_dropout: 0.15
+
+  # intraday_physics_dim: number of per-timestep physics channels (zenith, ETR, GCS).
+  intraday_physics_dim: 3
+
+  encoder_film_hidden: 32
+  decoder_init_len: 8
+  decoder_z_proj_dim: 96      # 
+  decoder_delta_physics: true  # add Deltazenith, DeltaETR to decoder physics input
+  decoder_z_film_hidden: 48   # 
+
+  # z_var: variability latent appended to z_flat to form z_full (116 dims total).
+  # Decoder only sees z_flat (first latent_dim dims); z_var is diffusion-model only.
+  z_var_dim: 4
+  z_var_proj_hidden: 32
+  z_var_ema_decay: 0.99
+  z_var_use_ramp: true
+
+  decoder_phys_skip: true     # per-timestep physics skip connections (generation-safe)
+  phys_skip_hidden: 0         # 0 = single linear projection; >0 = nonlinear MLP
+
+  # -- Spectral loss ---------------------------------------------------------
+  spectral_weight: 0.65       # primary force preserving intraday variability
+  spectral_warmup_epochs: 10  # ramp from 0 to spectral_weight over first 10 epochs
+
+  ramp_significance_threshold: 0.015  # lower = more mixed-overcast ramps counted
+  ramp_diag_threshold: 0.05
+  ramp_offset_steps: 2
+  phase_weight: 0.20
+  phase_amp_threshold: 0.05
+  curvature_weight: 0.45      # forces reproduction of sharp cloudy-day spikes
+
+  # -- Per-regime reconstruction weights -------------------------------------
+  # [clear, mixed_clear, mixed_overcast, overcast]
+  regime_loss_weights: [1, 3, 4, 3]
+
+  # -- Separation loss -------------------------------------------------------
+  regime_sep_weight: 1.5
+
+  dynamic_margin_alpha: 0.72
+
+  mixed_margin_scale: 0.50
+  mixed_sep_weight: 2.0
+  regime_sep_min_samples: 4
+  sep_ema_decay: 0.98
+
+  # -- Latent regularisation -------------------------------------------------
+  latent_tau_percentile_lo: 1.0
+  latent_tau_percentile_hi: 99.0
+  latent_tau_std_margin: 0.5
+
+  z_var_weight: 5  # it was 2.5 
+
+  z_std_target: 0.90
+
+  z_std_upper_target: 2.2     # upper bound prevents runaway driven by sep loss
+  z_var_weight_upper: 2    # weight for upper-bound penalty (small = gentle nudge)
+
+  # tau_max = -log(0.007) = 4.962. Raised from 0.01 because latent_max was
+  # persistently 5.5-6.0, clamping every forward pass and losing overcast info.
+  z_norm_clamp_lo: 0.007
+
+  # -- Diagnostic warning thresholds -----------------------------------------
+  mixed_recon_warn_ratio: 1.5
+  mixed_recon_err_ratio:  2.5
+  oc_recon_err_ratio:     3.0
+  ramp_warn_ratio:        2.5
+  latent_mean_warn:       0.5
+  latent_std_warn:        2.0
+  latent_max_warn:        5.2
+  decoder_clamp_warn:     0.05
+  dead_dim_std_threshold: 0.05
+  hot_dim_std_threshold:  4.0
+
+  # -- Startup sanity check thresholds ---------------------------------------
+  k_max_clip_warn_threshold:  1.50
+  phase_weight_warn_lo:       0.15
+  phase_weight_warn_recommended: 0.20
+  spectral_weight_warn_hi:    0.50
+  tau_cal_min_samples:        10
+  vae_stagnation_recon_thr: 0.25
+
+  obs_channels:
+    - diffuse_fraction
+    - dni
+    - sky_clarity_index
+    - csi_autocorrelation
+    - irradiance_gradient_mag
+    - csi_variability_w3
+    - csi_variability_w10
+    - csi_ramp_rate
+    - csi_trend_w5
+    - combined_ramp_event_100
+    - combined_ramp_event_300
+
+# -----------------------------------------------------------------------------
+# Stage 2: Latent Diffusion
+# -----------------------------------------------------------------------------
+diffusion:
+  num_steps: 1000
+  noise_schedule: cosine
+  cosine_s: 0.008
+  alpha_bar_min: 0.002
+  prediction_type: v
+
+  d_model: 320                # wider for 4-regime conditioning over 112-dim latents
+  n_heads: 8
+  n_layers: 8                 # depth needed for long-range temporal dependencies
+  dropout: 0.10
+  ffn_mult: 4
+  day_feat_dim: 16              # 7 solar + 10 climate (kgcpy Koppen one-hot + irr quantiles)
+  loc_feat_dim: 4
+  solar_day_feat_dim: 6    # pure solar dims - used by SiteContextEmbedding to slice climate
+  site_embed_dim: 64       # hidden dim of SiteContextEmbedding MLP
+  
+  physics_embed_dim: 48       # proportional upscale with d_model
+  intraday_proj_dim: 96       # scaled with d_model
+  n_regimes: 4
+  regime_embed_dim: 96        # larger embedding = stronger regime conditioning
+
+  cfg_dropout_prob: 0.20
+  cfg_guidance_scale: 2.5   # balanced 4.0 overcorrected clear-sky bias, 1.8 too weak
+
+  min_snr_gamma: 5.0          # weights mid-noise steps where regime structure lives
+
+  regime_loss_weights_diff: [1, 2, 3, 6]
+
+  per_day_k_sampling: true
+  inpainting_prob: 0.35
+  n_ctx_train: 9              # must equal window_size(14) - inference.stride(5) = 9
+
+  temporal_weight: 0.2
+  variance_weight: 0.10
+  ramp_snr_floor: 1.0
+
+# -----------------------------------------------------------------------------
+# Training
+# -----------------------------------------------------------------------------
+training:
+  vae:
+    epochs: 100
+    batch_size: 64
+    lr: 3.0e-4
+    lr_min: 1.0e-5
+    warmup_epochs: 10
+    warmup_start_factor: 0.1
+    grad_clip: 1.0
+    weight_decay: 1.0e-4
+
+    early_stopping_patience: 40
+
+    use_sampler: false
+
+    num_workers: 4
+    log_every_n_steps: 50
+    log_grad_every_n_epochs: 999
+    loss_spike_multiplier: 10.0
+    loss_ema_alpha: 0.05
+
+  diffusion:
+    epochs: 300
+    batch_size: 48
+    lr: 8.0e-5
+    lr_min: 1.0e-6
+    warmup_epochs: 25
+    warmup_start_factor: 1.0e-3
+    grad_clip: 1.0
+    weight_decay: 0.0
+    ema_decay: 0.999
+    val_ema_alpha: 0.22
+
+    early_stopping_patience: 40
+
+    num_workers: 4
+    latent_cache_aug_passes: 8
+    log_every_n_steps: 50
+    log_grad_every_n_epochs: 999
+
+    use_sampler: false
+
+# -----------------------------------------------------------------------------
+# Inference
+# -----------------------------------------------------------------------------
+inference:
+  stride: 5
+  smooth_sigma: 0.50
+  boundary_width: 3
+  ddim_steps: 50
+  ddim_eta: 0.0
+  context_noise_std: 0.0
+  regime_feedback_temperature: 0.25
+  
+# -----------------------------------------------------------------------------
+# File paths
+# -----------------------------------------------------------------------------
+paths:
+  vae_checkpoint:           checkpoints/vae_best.pt
+  vae_checkpoint_healthy:   checkpoints/vae_best_healthy.pt
+  diffusion_checkpoint:     checkpoints/diffusion_best.pt
+  latent_cache:             cache/latents.npy
+  latent_relabels:          cache/latent_relabels.npy
+  latent_relabels_map:      cache/latent_relabels_map.json
+  latent_tau_stats:         cache/latent_tau_stats.json
+  regime_gmm:               cache/regime_gmm.json
+  norm_stats_intraday:      data/norm_intraday.json
+  norm_stats_day_feat:      data/norm_day_feat.json
+  norm_stats_obs_phys:      data/norm_obs_phys.json
+  norm_stats_climate:       data/norm_climate_stats.json
+  train_profiles:           data/profiles/train_profiles.json
+  val_profiles:             data/profiles/val_profiles.json
+  test_profiles:            data/profiles/test_profiles.json
+  vae_training_log:         logs/vae_training_log.jsonl
+  diffusion_training_log:   logs/diffusion_training_log.jsonl
+  output_csv:               outputs/timeseries.csv
+
+# -----------------------------------------------------------------------------
+# Diagnostics
+# -----------------------------------------------------------------------------
+diagnostics:
+  vae_diag_freq: 5
+  latent_sep_log_freq: 5
+  tau_separation_min_to_proceed: 0.20
+  tau_diag_freq: 15
+  gen_diag_freq: 15
+  gen_diag_batches: 2
+
+  cloudy_clear_ratio_err:  6.0
+  cloudy_clear_ratio_warn: 4.0
+  overcast_loss_ratio_warn: 4.0
+  snr_low_high_ratio_warn:  3.0
+  tau_mean_warn:  1.0
+  tau_std_healthy_lo: 0.3
+  tau_std_healthy_hi: 2.5
+  tau_overflow_mean_thr: 3.0
+  tau_overflow_std_thr:  4.0
+  grad_norm_warn: 10.0
+  double_comp_obs_cloudy_warn: 0.55
+  double_comp_weight_warn: 1.5
+
+  # With sampler disabled, loss weights alone rebalance regimes.
+  # Startup and per-epoch double-comp thresholds raised to avoid false positives.
+  diff_startup_weight_warn: 4.0
+  diff_epoch_weight_warn: 3.5
+
+  snr_low_boundary:  1.0
+  snr_high_boundary: 10.0
+
+  gen_coverage_bin_lo: 0.40
+  gen_coverage_bin_hi: 0.70
+  diversity_ratio_err:  0.3
+  diversity_ratio_warn: 0.6
+  coverage_dark_gap_warn: 0.10
+  coverage_brt_gap_warn:  0.10
+  window_var_ratio_warn:  0.2
+
+  latent_sep_dist_min_warn: 0.5
+  overcast_min_frac_warn: 0.02
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logging:
+  log_every_n_steps: 50
+  save_every_n_epochs: 10
+
+# -----------------------------------------------------------------------------
+# Adaptive Training Controller
+# -----------------------------------------------------------------------------
+controller:
+  enabled: true
+
+  guidance_scale_ceil: 4.0
+
+  # -- grad_clip rules -------------------------------------------------------
+  gnorm_spike_ratio: 5.0
+  gnorm_consec_epochs: 3
+  grad_clip_decay: 0.70
+  grad_clip_floor_vae:  0.50
+  grad_clip_floor_diff: 0.10
+  grad_clip_cooldown:   4
+
+  # -- separation loss rules (VAE only) -------------------------------------
+  sep_dominance_frac:  0.15
+  sep_weight_decay:    0.75
+  sep_weight_floor:    0.20
+  sep_alpha_decay:     0.85
+  sep_alpha_floor:     0.30
+  sep_cooldown:        5
+
+  # -- z_std rules (VAE only) --------------------------------------------
+  z_std_low_frac:  0.75
+  z_std_high_frac: 2.80
+
+  z_std_high_abs:    1.80    # only fire upper penalty above this absolute z_std
+  z_var_weight_ceil: 12.0     # hard cap prevents runaway escalation
+
+  z_var_weight_boost_low:  1.60
+  z_var_weight_boost_high: 1.08
+  z_std_cooldown: 3
+
+  # -- diffusion cloudy/clear ratio rules (Stage 2 only) --------------------
+  diff_ratio_thr:     4.0
+  diff_ratio_consec:  3
+  diff_weight_boost:  1.15
+  diff_weight_ceil:   3.5    # cap prevents over-correction (was 4.0 last run)
+  diff_ratio_cooldown: 6
+
+  variance_weight_ceil: 2.0
