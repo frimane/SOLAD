@@ -6,13 +6,14 @@
 
 Generate synthetic 10-minute GHI sequences from **latitude, longitude, and a date range**, with no site measurements required.
 
-[![Open in Streamlit](https://img.shields.io/badge/Open%20in%20Streamlit-solad1.streamlit.app-FF4B4B?logo=streamlit&logoColor=white&style=for-the-badge)](https://solad1.streamlit.app/)
+👉 [![Open in Streamlit](https://img.shields.io/badge/Open%20in%20Streamlit-solad1.streamlit.app-FF4B4B?logo=streamlit&logoColor=white&style=for-the-badge)](https://solad1.streamlit.app/)
 
 **[Local installation](#local-installation)** · **[Architecture](#architecture)** · **[Citation](#citation)**
 
 </div>
 
-> **No installation needed.** Generate synthetic solar irradiance directly in your browser at **[Live demo](https://solad1.streamlit.app/)** .
+> **No installation needed.** Generate synthetic solar irradiance directly in your browser at **[Live demo](https://solad1.streamlit.app/)** 
+
 > If the application is asleep, select **Yes, get this app back up!** and wait for the service to restart.
 
 ---
