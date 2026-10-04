@@ -6,7 +6,7 @@
 
 ###### Generate synthetic 10-minute GHI sequences from **latitude, longitude, and a date range**, no site measurements required
 
-### 👉 [![Open in Streamlit](https://img.shields.io/badge/Open%20in%20Streamlit-solad1.streamlit.app-FF4B4B?logo=streamlit&logoColor=white&style=for-the-badge)](https://solad1.streamlit.app/)
+👉 [![Open in Streamlit](https://img.shields.io/badge/Open%20in%20Streamlit-solad1.streamlit.app-FF4B4B?logo=streamlit&logoColor=white&style=for-the-badge)](https://solad1.streamlit.app/)
 
 **[Local installation](#local-installation)** · **[Architecture](#architecture)** · **[Citation](#citation)**
 
@@ -119,24 +119,6 @@ streamlit run app.py
 The app performs a startup check and loads the released inference bundle from paths relative to the repository root.
 
 > **Note:** Do not rename or move the bundle files unless the paths in `app.py` and `config.yaml` are updated as well.
-
----
-
-## How it works
-
-The generation pipeline calculates the clear-sky envelope and solar geometry for the requested dates, samples the latent weather sequence, decodes daily clear-sky-index profiles, restores nighttime values, and converts the result to GHI.
-
-```mermaid
-flowchart LR
-    A["Latitude, longitude,<br/>date range"] --> B["Physics preprocessing<br/>(pvlib)"]
-    B --> C["Latent Transformer<br/>diffusion"]
-    C --> D["Physics-conditioned<br/>daily decoder"]
-    D --> E["Clear-sky index<br/>profiles"]
-    E --> F["Restore night zeros,<br/>convert to GHI"]
-    F --> G["Synthetic GHI<br/>(10-min)"]
-    B -. "solar geometry,<br/>clear-sky GHI" .-> D
-    B -. "clear-sky GHI" .-> F
-```
 
 ---
 
