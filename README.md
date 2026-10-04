@@ -4,9 +4,9 @@
 
 ### Physics-Guided Latent Diffusion for Synthetic Solar Irradiance Generation
 
-##### Generate synthetic 10-minute GHI sequences from **latitude, longitude, and a date range**, with no site measurements required
+###### Generate synthetic 10-minute GHI sequences from **latitude, longitude, and a date range**, with no site measurements required
 
-👉 [![Open in Streamlit](https://img.shields.io/badge/Open%20in%20Streamlit-solad1.streamlit.app-FF4B4B?logo=streamlit&logoColor=white&style=for-the-badge)](https://solad1.streamlit.app/)
+## 👉 [![Open in Streamlit](https://img.shields.io/badge/Open%20in%20Streamlit-solad1.streamlit.app-FF4B4B?logo=streamlit&logoColor=white&style=for-the-badge)](https://solad1.streamlit.app/)
 
 **[Local installation](#local-installation)** · **[Architecture](#architecture)** · **[Citation](#citation)**
 
