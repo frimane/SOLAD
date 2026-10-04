@@ -7,14 +7,12 @@
 Generate synthetic 10-minute GHI sequences from **latitude, longitude, and a date range**, with no site measurements required.
 
 [![Open in Streamlit](https://img.shields.io/badge/Open%20in%20Streamlit-solad1.streamlit.app-FF4B4B?logo=streamlit&logoColor=white&style=for-the-badge)](https://solad1.streamlit.app/)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white&style=for-the-badge)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-GPLv3-blue?style=for-the-badge)](LICENSE)
 
-**[Live demo](https://solad1.streamlit.app/)** · **[Local installation](#local-installation)** · **[Architecture](#architecture)** · **[Citation](#citation)**
+**[Local installation](#local-installation)** · **[Architecture](#architecture)** · **[Citation](#citation)**
 
 </div>
 
-> **No installation needed.** Generate synthetic solar irradiance directly in your browser at [solad1.streamlit.app](https://solad1.streamlit.app/).
+> **No installation needed.** Generate synthetic solar irradiance directly in your browser at **[Live demo](https://solad1.streamlit.app/)** .
 > If the application is asleep, select **Yes, get this app back up!** and wait for the service to restart.
 
 ---
@@ -43,7 +41,7 @@ Generate synthetic 10-minute GHI sequences from **latitude, longitude, and a dat
 
 SOLAD generates synthetic **global horizontal irradiance (GHI)** sequences at **10-minute resolution** from a site's latitude, longitude, and date range alone. It does not require concurrent meteorological observations, local calibration, or site-specific measurements at inference time.
 
-Solar irradiance data is essential for photovoltaic yield assessment, storage sizing, grid integration, ramp-event analysis, probabilistic forecasting, and renewable-energy planning. High-quality ground measurements, however, are sparse and unevenly distributed. SOLAD addresses this gap with a physics-guided, two-stage latent diffusion model that learns atmospheric variability from measured irradiance while calculating the deterministic solar envelope directly from location and date.
+Solar irradiance data is essential for photovoltaic yield assessment, storage sizing, grid integration, ramp-event analysis, probabilistic forecasting, and renewable-energy planning. High-quality ground measurements, however, are sparse and unevenly distributed. SOLAD addresses this gap with a physics-guided, two-stage latent diffusion model that learns atmospheric variability from measured irradiance.
 
 The model separates what is known from physics from what must be learned from data:
 
@@ -56,8 +54,6 @@ The model separates what is known from physics from what must be learned from da
 | Nighttime values and physical bounds | Enforced by the generation pipeline |
 
 The result is a reusable generator for synthetic sequences of arbitrary length, including locations that were not present in the training set.
-
-**Maintainer and designer:** Azeddine Frimane
 
 ---
 
@@ -119,7 +115,7 @@ For a CUDA-enabled installation, install the PyTorch build matching the local CU
 streamlit run app.py
 ```
 
-The app performs a startup artifact check and loads the released inference bundle from paths relative to the repository root.
+The app performs a startup check and loads the released inference bundle from paths relative to the repository root.
 
 > **Note:** Do not rename or move the bundle files unless the paths in `app.py` and `config.yaml` are updated as well.
 
